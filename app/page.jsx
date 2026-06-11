@@ -49,12 +49,12 @@ export default function PropDesk() {
   const [error, setError] = useState(null);
   const [slate, setSlate] = useState([]);
   const [draft, setDraft] = useState(null);
+  const [window_, setWindow] = useState(10);
   const [games, setGames] = useState([]);
   const [slipOpen, setSlipOpen] = useState(false);
   const [stake, setStake] = useState(100);
   const [showHelp, setShowHelp] = useState(false);
 
-  // 747 line-check state
   const [bookStat, setBookStat] = useState("pts");
   const [bookLine, setBookLine] = useState("");
 
@@ -81,7 +81,7 @@ export default function PropDesk() {
       const r = await fetch(`/api/logs?playerId=${encodeURIComponent(p.id)}&n=20`);
       const d = await r.json();
       if (d.error) throw new Error(d.error);
-      setDraft({ player: p, logs: d.logs, stat: "pts", line: 20.5, side: "over", odds: defaultOdds, window: 10 });
+      setDraft({ player: p, logs: d.logs, odds: defaultOdds });
       setBookStat("pts"); setBookLine("");
     } catch (e) { setError(e.message); } finally { setBusy(false); }
   };
@@ -100,7 +100,7 @@ export default function PropDesk() {
     if (slate.length >= 10) return;
     setSlate(prev => [...prev, {
       player: draft.player, logs: draft.logs, stat, line, side,
-      odds: odds || draft.odds, window: draft.window, team: draft.player.team, id: Date.now(),
+      odds: odds || draft.odds, window: window_, team: draft.player.team, id: Date.now(),
     }]);
     setSlipOpen(true);
   };
@@ -117,13 +117,12 @@ export default function PropDesk() {
   const parlays = useMemo(() => recommendParlays(legs), [legs]);
   const slip = useMemo(() => legs.length >= 2 ? priceParlay(legs) : null, [legs]);
 
-  const suggestions = useMemo(() => draft ? autoSuggest(draft.logs, draft.window, draft.odds).slice(0, 6) : [], [draft]);
+  const suggestions = useMemo(() => draft ? autoSuggest(draft.logs, window_, draft.odds).slice(0, 6) : [], [draft, window_]);
 
-  // 747 line check result
   const bookEval = useMemo(() => {
     if (!draft || bookLine === "" || isNaN(Number(bookLine))) return null;
-    return evalLine(draft.logs, draft.window, bookStat, Number(bookLine), draft.odds);
-  }, [draft, bookStat, bookLine]);
+    return evalLine(draft.logs, window_, bookStat, Number(bookLine), draft.odds);
+  }, [draft, bookStat, bookLine, window_]);
 
   return (
     <div style={{ minHeight: "100vh", background: "var(--bg)", color: "var(--tx)", fontFamily: "Inter,sans-serif", paddingBottom: 120 }}>
@@ -157,11 +156,11 @@ export default function PropDesk() {
             <div style={sectionTitle}>How to actually win with this</div>
             <div style={{ fontSize: 13, lineHeight: 1.7, color: "var(--tx)" }}>
               <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>1. Open 747 first.</b> Look at the prop they offer — e.g. "Wembanyama Points, line 35."</p>
-              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>2. Type THAT line here</b> in the "Check 747's line" box. The app shows how often he actually hit over/under <i>that exact number</i> in recent games. This is the only way the % means anything — your line must match 747's line.</p>
-              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>3. Look for a gap.</b> If 747 set the line at 35 but he's gone over only 2 of 10 times, the UNDER is the value. If the app says 70%+ on one side, that's a lean.</p>
-              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--green)" }}>The edge:</b> you're hunting lines 747 set too high or too low versus how the player's actually been playing. The app finds the gap; you decide if there's a reason for it (injury, matchup).</p>
-              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Parlay = ALL legs must win.</b> Miss one leg, lose everything. 5 legs at 70% each = only 17% the whole thing hits. Fewer legs is safer.</p>
-              <p style={{ color: "var(--red)" }}>This is a screening tool, not a guarantee. 747 isn't dumb — sometimes their "soft" line reflects news you don't see. Bet only what you can lose.</p>
+              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>2. Type THAT line here</b> in the "Check 747's line" box. The app shows how often he actually hit over/under <i>that exact number</i>. The line must match 747's or the % means nothing.</p>
+              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>3. Look for a gap.</b> 747 set 35 but he went over only 2 of 10? The UNDER is the value.</p>
+              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Games slider</b> sets how many recent games to use — fewer (5) = hot/cold form, more (20) = stable average.</p>
+              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Parlay = ALL legs must win.</b> Miss one, lose everything. 5 legs at 70% each = only 17% the whole thing hits.</p>
+              <p style={{ color: "var(--red)" }}>A screening tool, not a guarantee. 747's "soft" line may reflect news you don't see. Bet only what you can lose.</p>
             </div>
           </section>
         )}
@@ -208,16 +207,21 @@ export default function PropDesk() {
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
               <div>
                 <div style={{ fontSize: 20, fontFamily: "Oswald,sans-serif" }}>{draft.player.name}</div>
-                <div style={{ color: "var(--mut)", fontSize: 12 }}>{draft.player.team} · {draft.player.position} · last {draft.window} games</div>
+                <div style={{ color: "var(--mut)", fontSize: 12 }}>{draft.player.team} · {draft.player.position}</div>
               </div>
               <button onClick={() => setDraft(null)} style={{ ...btnGhost, padding: "4px 8px" }}>✕</button>
             </div>
 
-            {/* ★ 747 LINE CHECK — the main tool */}
+            {/* Games slider — restored, controls every calculation on this card */}
+            <label style={lbl}>Use last {window_} games {window_ <= 6 ? "(recent form)" : window_ >= 16 ? "(season-long)" : ""}
+              <input type="range" min="5" max="20" value={window_}
+                onChange={e => setWindow(Number(e.target.value))}
+                style={{ width: "100%", accentColor: "var(--amber)" }} />
+            </label>
+
+            {/* ★ 747 LINE CHECK */}
             <div style={{ background: "rgba(251,191,36,.07)", border: "1px solid rgba(251,191,36,.4)", borderRadius: 8, padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: "var(--amber)", fontFamily: "Oswald,sans-serif", letterSpacing: "0.05em" }}>
-                ★ CHECK 747'S LINE
-              </div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "var(--amber)", fontFamily: "Oswald,sans-serif", letterSpacing: "0.05em" }}>★ CHECK 747'S LINE</div>
               <div style={{ fontSize: 11, color: "var(--mut)" }}>Type the exact stat & line 747 is offering. See how often it actually hit.</div>
               <div style={{ display: "flex", gap: 8 }}>
                 <select value={bookStat} onChange={e => setBookStat(e.target.value)} style={{ ...inp, flex: 1 }}>
@@ -258,7 +262,7 @@ export default function PropDesk() {
               )}
             </div>
 
-            {/* Best bets (app-suggested lines — for exploring, not matching 747) */}
+            {/* Best bets */}
             <div>
               <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--mut)", marginBottom: 4, fontFamily: "'IBM Plex Mono',monospace" }}>
                 Or explore: his strongest stats (app picks the line)
