@@ -1,41 +1,47 @@
-// GET /api/logs?playerId=123&season=2025&n=20 → recent game logs, newest first
-export const revalidate = 900; // cache 15 min — keeps free-tier rate limits safe
+// GET /api/logs?playerId=123&n=20 — NBA.com game logs, no key required
+import { NBA_HEADERS, CURRENT_SEASON } from "../../../lib/nba";
+export const revalidate = 900;
 
-const KEY = (process.env.BALLDONTLIE_API_KEY || "").trim();
+const parseRows = (rows, postseason) =>
+  // NBA.com playergamelog headers (indices):
+  // 3=GAME_DATE, 4=MATCHUP, 6=MIN, 10=FG3M, 18=REB, 19=AST, 20=STL, 21=BLK, 22=TOV, 24=PTS
+  rows.map((r) => ({
+    date: r[3],
+    matchup: r[4],
+    min: r[6] || "0",
+    pts: r[24] ?? 0,
+    reb: r[18] ?? 0,
+    ast: r[19] ?? 0,
+    stl: r[20] ?? 0,
+    blk: r[21] ?? 0,
+    fg3m: r[10] ?? 0,
+    turnover: r[22] ?? 0,
+    postseason,
+  }));
 
 export async function GET(request) {
   const sp = new URL(request.url).searchParams;
   const playerId = sp.get("playerId");
-  const season = sp.get("season") || "2025"; // balldontlie season = start year
   const n = Math.min(Number(sp.get("n") || 20), 50);
   if (!playerId) return Response.json({ error: "missing playerId" }, { status: 400 });
-  if (!KEY) return Response.json({ error: "BALLDONTLIE_API_KEY env var is empty — set it in Vercel and redeploy" }, { status: 500 });
 
-  const r = await fetch(
-    `https://api.balldontlie.io/v1/stats?player_ids[]=${playerId}&seasons[]=${season}&per_page=100&postseason=true`,
-    { headers: { Authorization: KEY } }
-  );
-  if (!r.ok) return Response.json({ error: `balldontlie ${r.status} — check BALLDONTLIE_API_KEY` }, { status: 502 });
-  const post = await r.json();
+  const base = `https://stats.nba.com/stats/playergamelog?PlayerID=${playerId}&Season=${CURRENT_SEASON}&LeagueID=00`;
+  const [regRes, poRes] = await Promise.all([
+    fetch(`${base}&SeasonType=Regular+Season`, { headers: NBA_HEADERS }),
+    fetch(`${base}&SeasonType=Playoffs`, { headers: NBA_HEADERS }),
+  ]);
 
-  // also pull regular season so early-season / non-playoff players still have data
-  const r2 = await fetch(
-    `https://api.balldontlie.io/v1/stats?player_ids[]=${playerId}&seasons[]=${season}&per_page=100&postseason=false`,
-    { headers: { Authorization: KEY } }
-  );
-  const reg = r2.ok ? await r2.json() : { data: [] };
+  if (!regRes.ok && !poRes.ok)
+    return Response.json({ error: `NBA.com returned ${regRes.status}` }, { status: 502 });
 
-  const all = [...(post.data || []), ...(reg.data || [])]
-    .filter((g) => g.min && g.min !== "0" && g.min !== "00")
-    .sort((a, b) => new Date(b.game.date) - new Date(a.game.date))
-    .slice(0, n)
-    .map((g) => ({
-      date: g.game.date.slice(0, 10),
-      vs: g.game.home_team_id === g.team.id ? "vs" : "@",
-      pts: g.pts, reb: g.reb, ast: g.ast, stl: g.stl, blk: g.blk,
-      fg3m: g.fg3m, turnover: g.turnover, min: g.min,
-      postseason: g.game.postseason,
-    }));
+  const reg = regRes.ok ? parseRows((await regRes.json()).resultSets?.[0]?.rowSet || [], false) : [];
+  const po = poRes.ok ? parseRows((await poRes.json()).resultSets?.[0]?.rowSet || [], true) : [];
 
-  return Response.json({ logs: all });
+  // NBA.com returns newest-first already; playoffs first so they weight more recent
+  const logs = [...po, ...reg]
+    .filter((g) => g.min && g.min !== "0" && g.min !== "00" && g.min !== "0:00")
+    .slice(0, n);
+
+  if (!logs.length) return Response.json({ error: "No game logs found — player may not have played this season." }, { status: 404 });
+  return Response.json({ logs });
 }
