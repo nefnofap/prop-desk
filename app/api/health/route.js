@@ -1,33 +1,23 @@
-// GET /api/health — full diagnostic
-import { NBA_HEADERS, CURRENT_SEASON } from "../../../lib/nba";
+// GET /api/health — ESPN connectivity check
+import { ESPN_BASE, ESPN_WEB, UA } from "../../../lib/espn";
 export const dynamic = "force-dynamic";
-const KEY = (process.env.BALLDONTLIE_API_KEY || "").trim();
 
 export async function GET() {
-  const get = async (url, headers = {}) => {
+  const get = async (url) => {
     try {
-      const r = await fetch(url, { headers, cache: "no-store" });
+      const r = await fetch(url, { headers: UA, cache: "no-store" });
       return r.status;
-    } catch (e) { return `err:${e.message.slice(0,40)}`; }
+    } catch (e) { return `err:${e.message.slice(0,30)}`; }
   };
-
-  const bdlPlayers = await get("https://api.balldontlie.io/v1/players?per_page=1", KEY ? { Authorization: KEY } : {});
-  const nbaPlayers = await get(`https://stats.nba.com/stats/commonallplayers?LeagueID=00&Season=${CURRENT_SEASON}&IsOnlyCurrentSeason=1`, NBA_HEADERS);
-  // Wembanyama NBA ID = 1641705
-  const nbaLogs = await get(`https://stats.nba.com/stats/playergamelog?PlayerID=1641705&Season=${CURRENT_SEASON}&SeasonType=Playoffs&LeagueID=00`, NBA_HEADERS);
-
-  const searchWorks = bdlPlayers === 200;
-  const logsWork = nbaLogs === 200;
-
+  // Wembanyama ESPN athlete id = 5104157
+  const scoreboard = await get(`${ESPN_BASE}/scoreboard`);
+  const gamelog = await get(`${ESPN_WEB}/athletes/5104157/gamelog`);
+  const athletes = await get(`${ESPN_WEB}/athletes?limit=5&active=true`);
+  const ok = scoreboard === 200 && gamelog === 200;
   return Response.json({
-    keyPresent: KEY.length > 0,
-    bdlPlayerSearch: bdlPlayers,
-    nbaComPlayerList: nbaPlayers,
-    nbaComGameLogs: nbaLogs,
-    verdict: !searchWorks
-      ? `Player search broken (${bdlPlayers}) — check BALLDONTLIE_API_KEY in Vercel env vars.`
-      : !logsWork
-      ? `Search works but NBA.com game logs return ${nbaLogs} — NBA.com is blocking Vercel's IPs. Need alternative data source.`
-      : "All systems go.",
+    dataSource: "ESPN public API (no key)",
+    scoreboard, gamelog, athleteList: athletes,
+    verdict: ok ? "All systems go — ESPN is reachable from Vercel."
+      : `ESPN issue — scoreboard:${scoreboard}, gamelog:${gamelog}. Retry in 30s.`,
   });
 }
