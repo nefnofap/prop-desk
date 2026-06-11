@@ -1,12 +1,15 @@
 // GET /api/player?q=wemban  → balldontlie player search (free API)
 export const revalidate = 3600;
 
+const KEY = (process.env.BALLDONTLIE_API_KEY || "").trim();
+
 export async function GET(request) {
   const q = new URL(request.url).searchParams.get("q");
   if (!q) return Response.json({ error: "missing q" }, { status: 400 });
+  if (!KEY) return Response.json({ error: "BALLDONTLIE_API_KEY env var is empty — set it in Vercel and redeploy" }, { status: 500 });
   const r = await fetch(
     `https://api.balldontlie.io/v1/players?search=${encodeURIComponent(q)}&per_page=10`,
-    { headers: { Authorization: process.env.BALLDONTLIE_API_KEY || "" } }
+    { headers: { Authorization: KEY } }
   );
   if (!r.ok) return Response.json({ error: `balldontlie ${r.status} — check BALLDONTLIE_API_KEY` }, { status: 502 });
   const data = await r.json();

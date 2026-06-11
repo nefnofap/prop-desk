@@ -1,16 +1,19 @@
 // GET /api/logs?playerId=123&season=2025&n=20 → recent game logs, newest first
 export const revalidate = 900; // cache 15 min — keeps free-tier rate limits safe
 
+const KEY = (process.env.BALLDONTLIE_API_KEY || "").trim();
+
 export async function GET(request) {
   const sp = new URL(request.url).searchParams;
   const playerId = sp.get("playerId");
   const season = sp.get("season") || "2025"; // balldontlie season = start year
   const n = Math.min(Number(sp.get("n") || 20), 50);
   if (!playerId) return Response.json({ error: "missing playerId" }, { status: 400 });
+  if (!KEY) return Response.json({ error: "BALLDONTLIE_API_KEY env var is empty — set it in Vercel and redeploy" }, { status: 500 });
 
   const r = await fetch(
     `https://api.balldontlie.io/v1/stats?player_ids[]=${playerId}&seasons[]=${season}&per_page=100&postseason=true`,
-    { headers: { Authorization: process.env.BALLDONTLIE_API_KEY || "" } }
+    { headers: { Authorization: KEY } }
   );
   if (!r.ok) return Response.json({ error: `balldontlie ${r.status} — check BALLDONTLIE_API_KEY` }, { status: 502 });
   const post = await r.json();
@@ -18,7 +21,7 @@ export async function GET(request) {
   // also pull regular season so early-season / non-playoff players still have data
   const r2 = await fetch(
     `https://api.balldontlie.io/v1/stats?player_ids[]=${playerId}&seasons[]=${season}&per_page=100&postseason=false`,
-    { headers: { Authorization: process.env.BALLDONTLIE_API_KEY || "" } }
+    { headers: { Authorization: KEY } }
   );
   const reg = r2.ok ? await r2.json() : { data: [] };
 
