@@ -2,7 +2,7 @@
 import { useState, useMemo, useEffect } from "react";
 import {
   STAT_TYPES, impliedProb, weightedShrunkProb, kellyStake,
-  priceParlay, recommendParlays, autoSuggest, decimalToAmerican,
+  priceParlay, recommendParlays, autoSuggest, evalLine,
 } from "../lib/engine";
 
 const fmtPct = (x, dp = 1) => `${(x * 100).toFixed(dp)}%`;
@@ -22,7 +22,7 @@ function SegBar({ p, segs = 20 }) {
 
 function Chip({ val, hit }) {
   return (
-    <span title={hit ? "Hit the line this game" : "Missed the line this game"} style={{
+    <span style={{
       fontFamily: "'IBM Plex Mono',monospace", fontSize: 11, padding: "2px 6px", borderRadius: 4,
       border: `1px solid ${hit ? "rgba(52,211,153,.4)" : "rgba(248,113,113,.3)"}`,
       color: hit ? "var(--green)" : "var(--red)",
@@ -54,6 +54,10 @@ export default function PropDesk() {
   const [stake, setStake] = useState(100);
   const [showHelp, setShowHelp] = useState(false);
 
+  // 747 line-check state
+  const [bookStat, setBookStat] = useState("pts");
+  const [bookLine, setBookLine] = useState("");
+
   useEffect(() => {
     fetch("/api/games").then(r => r.json()).then(d => setGames(d.games || [])).catch(() => {});
   }, []);
@@ -78,6 +82,7 @@ export default function PropDesk() {
       const d = await r.json();
       if (d.error) throw new Error(d.error);
       setDraft({ player: p, logs: d.logs, stat: "pts", line: 20.5, side: "over", odds: defaultOdds, window: 10 });
+      setBookStat("pts"); setBookLine("");
     } catch (e) { setError(e.message); } finally { setBusy(false); }
   };
 
@@ -91,10 +96,13 @@ export default function PropDesk() {
     } catch (e) { setError(e.message); } finally { setBusy(false); }
   };
 
-  const addToSlip = (leg) => {
+  const addLeg = (stat, line, side, odds) => {
     if (slate.length >= 10) return;
-    setSlate(prev => [...prev, { ...leg, id: Date.now() }]);
-    setDraft(null); setQuery(""); setSlipOpen(true);
+    setSlate(prev => [...prev, {
+      player: draft.player, logs: draft.logs, stat, line, side,
+      odds: odds || draft.odds, window: draft.window, team: draft.player.team, id: Date.now(),
+    }]);
+    setSlipOpen(true);
   };
 
   const removeLeg = (id) => setSlate(prev => prev.filter(l => l.id !== id));
@@ -109,13 +117,13 @@ export default function PropDesk() {
   const parlays = useMemo(() => recommendParlays(legs), [legs]);
   const slip = useMemo(() => legs.length >= 2 ? priceParlay(legs) : null, [legs]);
 
-  const draftVals = draft ? draft.logs.slice(0, draft.window).map(STAT_TYPES[draft.stat].calc) : [];
-  const draftProb = draft ? weightedShrunkProb(draftVals, draft.line, draft.side) : null;
-  const draftEdge = draft && draftProb ? draftProb.p - impliedProb(draft.odds) : 0;
-  const draftKelly = draft && draftProb ? kellyStake(draftProb.p, draft.odds, bankroll) : 0;
-  const draftAvg = draftVals.length ? (draftVals.reduce((a, b) => a + b, 0) / draftVals.length) : 0;
   const suggestions = useMemo(() => draft ? autoSuggest(draft.logs, draft.window, draft.odds).slice(0, 6) : [], [draft]);
-  const dv = draft ? verdict(draftEdge) : null;
+
+  // 747 line check result
+  const bookEval = useMemo(() => {
+    if (!draft || bookLine === "" || isNaN(Number(bookLine))) return null;
+    return evalLine(draft.logs, draft.window, bookStat, Number(bookLine), draft.odds);
+  }, [draft, bookStat, bookLine]);
 
   return (
     <div style={{ minHeight: "100vh", background: "var(--bg)", color: "var(--tx)", fontFamily: "Inter,sans-serif", paddingBottom: 120 }}>
@@ -133,11 +141,11 @@ export default function PropDesk() {
               <input type="number" value={bankroll} onChange={e => setBankroll(Number(e.target.value) || 0)} style={{ ...inp, width: 100 }} />
             </div>
           </label>
-          <label style={lbl}>My payout odds
+          <label style={lbl}>Payout odds per leg
             <input type="number" step="0.01" value={defaultOdds} onChange={e => setDefaultOdds(Number(e.target.value) || 1.91)} style={{ ...inp, width: 80 }} />
           </label>
           <button onClick={() => setShowHelp(!showHelp)} style={{ ...btnGhost, fontSize: 11 }}>
-            {showHelp ? "Hide guide" : "❓ How to read this"}
+            {showHelp ? "Hide guide" : "❓ How to use this"}
           </button>
         </div>
       </header>
@@ -146,13 +154,14 @@ export default function PropDesk() {
 
         {showHelp && (
           <section style={{ ...panel, marginTop: 14 }}>
-            <div style={sectionTitle}>How to read this</div>
+            <div style={sectionTitle}>How to actually win with this</div>
             <div style={{ fontSize: 13, lineHeight: 1.7, color: "var(--tx)" }}>
-              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>The line</b> is the number you bet over or under. "Over 25.5 points" means he needs 26+. "Under" means he stays below it.</p>
-              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Odds (1.91)</b> is your payout multiplier. Bet {sym}100 at 1.91 → get {sym}191 back if it wins ({sym}91 profit). It also sets your <b>break-even</b>: at 1.91 you must win 52% of the time just to not lose money.</p>
-              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Hit %</b> is how often we estimate the bet wins (over OR under), based on his real recent games.</p>
-              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Edge</b> = Hit % minus break-even. If it hits 56% but you only need 52%, that's +4% edge in your favor. <span style={{ color: "var(--green)" }}>Green = good bet</span>, <span style={{ color: "var(--mut)" }}>grey = skip it</span>.</p>
-              <p><b style={{ color: "var(--amber)" }}>Best bets</b> automatically picks whichever side — over or under — has the better chance for each stat.</p>
+              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>1. Open 747 first.</b> Look at the prop they offer — e.g. "Wembanyama Points, line 35."</p>
+              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>2. Type THAT line here</b> in the "Check 747's line" box. The app shows how often he actually hit over/under <i>that exact number</i> in recent games. This is the only way the % means anything — your line must match 747's line.</p>
+              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>3. Look for a gap.</b> If 747 set the line at 35 but he's gone over only 2 of 10 times, the UNDER is the value. If the app says 70%+ on one side, that's a lean.</p>
+              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--green)" }}>The edge:</b> you're hunting lines 747 set too high or too low versus how the player's actually been playing. The app finds the gap; you decide if there's a reason for it (injury, matchup).</p>
+              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Parlay = ALL legs must win.</b> Miss one leg, lose everything. 5 legs at 70% each = only 17% the whole thing hits. Fewer legs is safer.</p>
+              <p style={{ color: "var(--red)" }}>This is a screening tool, not a guarantee. 747 isn't dumb — sometimes their "soft" line reflects news you don't see. Bet only what you can lose.</p>
             </div>
           </section>
         )}
@@ -172,7 +181,7 @@ export default function PropDesk() {
         )}
 
         <section style={panel}>
-          <div style={sectionTitle}>Search player</div>
+          <div style={sectionTitle}>Search player (add as many as you want)</div>
           <div style={{ display: "flex", gap: 8 }}>
             <input value={query} placeholder="e.g. Wembanyama, Brunson"
               onChange={e => setQuery(e.target.value)}
@@ -194,7 +203,7 @@ export default function PropDesk() {
           {error && <div style={errStyle}>{error}</div>}
         </section>
 
-        {draft && draftProb && (
+        {draft && (
           <section style={{ ...panel, border: "1px solid rgba(251,191,36,.4)" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
               <div>
@@ -204,115 +213,95 @@ export default function PropDesk() {
               <button onClick={() => setDraft(null)} style={{ ...btnGhost, padding: "4px 8px" }}>✕</button>
             </div>
 
-            {/* BEST BETS as readable cards — picks the stronger side (over/under) */}
+            {/* ★ 747 LINE CHECK — the main tool */}
+            <div style={{ background: "rgba(251,191,36,.07)", border: "1px solid rgba(251,191,36,.4)", borderRadius: 8, padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "var(--amber)", fontFamily: "Oswald,sans-serif", letterSpacing: "0.05em" }}>
+                ★ CHECK 747'S LINE
+              </div>
+              <div style={{ fontSize: 11, color: "var(--mut)" }}>Type the exact stat & line 747 is offering. See how often it actually hit.</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <select value={bookStat} onChange={e => setBookStat(e.target.value)} style={{ ...inp, flex: 1 }}>
+                  {Object.entries(STAT_TYPES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+                </select>
+                <input type="number" step="0.5" value={bookLine} placeholder="747's line, e.g. 35"
+                  onChange={e => setBookLine(e.target.value)} style={{ ...inp, flex: 1 }} />
+              </div>
+
+              {bookEval && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                    <div style={{ ...sideBox, borderColor: bookEval.over > bookEval.under ? "var(--green)" : "var(--line)" }}>
+                      <div style={miniLbl}>OVER {bookEval.line}</div>
+                      <div style={{ ...miniVal, fontSize: 22, color: bookEval.over >= 0.6 ? "var(--green)" : bookEval.over <= 0.4 ? "var(--red)" : "var(--amber)" }}>{fmtPct(bookEval.over)}</div>
+                      <div style={{ fontSize: 10, color: "var(--mut)" }}>hit {bookEval.overHits}/{bookEval.n} games</div>
+                      <button onClick={() => addLeg(bookStat, bookEval.line, "over", draft.odds)} disabled={slate.length >= 10}
+                        style={{ ...btnGhost, fontSize: 11, padding: "5px 8px", marginTop: 6, width: "100%" }}>+ Add Over</button>
+                    </div>
+                    <div style={{ ...sideBox, borderColor: bookEval.under > bookEval.over ? "var(--green)" : "var(--line)" }}>
+                      <div style={miniLbl}>UNDER {bookEval.line}</div>
+                      <div style={{ ...miniVal, fontSize: 22, color: bookEval.under >= 0.6 ? "var(--green)" : bookEval.under <= 0.4 ? "var(--red)" : "var(--amber)" }}>{fmtPct(bookEval.under)}</div>
+                      <div style={{ fontSize: 10, color: "var(--mut)" }}>hit {bookEval.underHits}/{bookEval.n} games</div>
+                      <button onClick={() => addLeg(bookStat, bookEval.line, "under", draft.odds)} disabled={slate.length >= 10}
+                        style={{ ...btnGhost, fontSize: 11, padding: "5px 8px", marginTop: 6, width: "100%" }}>+ Add Under</button>
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 12, color: "var(--tx)", textAlign: "center", padding: "6px", background: "rgba(0,0,0,.25)", borderRadius: 6 }}>
+                    Lean: <b style={{ color: verdict(bookEval.edge).color }}>{bookEval.best.toUpperCase()} {bookEval.line}</b> ({fmtPct(bookEval.bestProb)}) — {verdict(bookEval.edge).text}
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--mut)" }}>
+                    Recent {STAT_TYPES[bookStat].label}: avg {bookEval.avg.toFixed(1)}, range {bookEval.min}–{bookEval.max} over {bookEval.n} games.
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                    {bookEval.vals.map((v, i) => <Chip key={i} val={v} hit={bookEval.best === "over" ? v > bookEval.line : v < bookEval.line} />)}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Best bets (app-suggested lines — for exploring, not matching 747) */}
             <div>
-              <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--amber)", marginBottom: 8, fontFamily: "'IBM Plex Mono',monospace" }}>
-                Best bets right now (at odds {draft.odds})
+              <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--mut)", marginBottom: 4, fontFamily: "'IBM Plex Mono',monospace" }}>
+                Or explore: his strongest stats (app picks the line)
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 {suggestions.map(s => {
                   const v = verdict(s.edge);
-                  const selected = draft.stat === s.key && draft.line === s.line && draft.side === s.side;
                   const sideLabel = s.side === "over" ? "Over" : "Under";
                   return (
-                    <button key={s.key} onClick={() => setDraft({ ...draft, stat: s.key, line: s.line, side: s.side })}
-                      style={{
-                        display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
-                        background: selected ? "rgba(251,191,36,.1)" : "rgba(0,0,0,.25)",
-                        border: `1px solid ${selected ? "var(--amber)" : "var(--line)"}`,
-                        borderRadius: 8, padding: "10px 12px", cursor: "pointer", textAlign: "left", width: "100%",
-                      }}>
+                    <div key={s.key}
+                      style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
+                        background: "rgba(0,0,0,.25)", border: "1px solid var(--line)", borderRadius: 8, padding: "10px 12px" }}>
                       <div>
                         <div style={{ fontSize: 14, color: "var(--tx)", fontWeight: 600 }}>
                           {s.label} — <span style={{ color: s.side === "over" ? "var(--green)" : "var(--amber)" }}>{sideLabel} {s.line}</span>
                         </div>
                         <div style={{ fontSize: 11, color: "var(--mut)", fontFamily: "'IBM Plex Mono',monospace" }}>
-                          {sideLabel === "Over" ? "went over in" : "stayed under in"} {s.hits} of last {s.n} · avg {s.avg.toFixed(1)}
+                          {sideLabel === "Over" ? "went over" : "stayed under"} {s.hits}/{s.n} · avg {s.avg.toFixed(1)}
                         </div>
                       </div>
-                      <div style={{ textAlign: "right" }}>
-                        <div style={{ fontSize: 16, fontWeight: 700, color: v.color, fontFamily: "'IBM Plex Mono',monospace" }}>{fmtPct(s.p)}</div>
-                        <div style={{ fontSize: 10, color: v.color, letterSpacing: "0.05em" }}>{v.text}</div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <div style={{ textAlign: "right" }}>
+                          <div style={{ fontSize: 16, fontWeight: 700, color: v.color, fontFamily: "'IBM Plex Mono',monospace" }}>{fmtPct(s.p)}</div>
+                          <div style={{ fontSize: 9, color: v.color }}>{v.text}</div>
+                        </div>
+                        <button onClick={() => addLeg(s.key, s.line, s.side, draft.odds)} disabled={slate.length >= 10}
+                          style={{ ...btnGhost, padding: "6px 10px", fontSize: 16 }}>+</button>
                       </div>
-                    </button>
+                    </div>
                   );
                 })}
               </div>
             </div>
-
-            <div style={{ borderTop: "1px solid var(--line)", paddingTop: 12 }}>
-              <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--mut)", marginBottom: 8, fontFamily: "'IBM Plex Mono',monospace" }}>Or build it yourself</div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 10 }}>
-                <label style={lbl}>Stat
-                  <select value={draft.stat} onChange={e => setDraft({ ...draft, stat: e.target.value })} style={inp}>
-                    {Object.entries(STAT_TYPES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
-                  </select>
-                </label>
-                <label style={lbl}>Line (the number)
-                  <input type="number" step="0.5" value={draft.line} onChange={e => setDraft({ ...draft, line: Number(e.target.value) })} style={inp} />
-                </label>
-                <label style={lbl}>Over or Under
-                  <select value={draft.side} onChange={e => setDraft({ ...draft, side: e.target.value })} style={inp}>
-                    <option value="over">Over</option>
-                    <option value="under">Under</option>
-                  </select>
-                </label>
-                <label style={lbl}>My payout odds
-                  <input type="number" step="0.01" value={draft.odds} onChange={e => setDraft({ ...draft, odds: Number(e.target.value) || 1.91 })} style={inp} />
-                </label>
-              </div>
-              <label style={{ ...lbl, marginTop: 10 }}>How many recent games to use: {draft.window}
-                <input type="range" min="5" max="20" value={draft.window}
-                  onChange={e => setDraft({ ...draft, window: Number(e.target.value) })}
-                  style={{ width: "100%", accentColor: "var(--amber)" }} />
-              </label>
-            </div>
-
-            {/* Game-by-game chips with label */}
-            <div>
-              <div style={{ fontSize: 10, color: "var(--mut)", marginBottom: 5 }}>
-                Each box = one game ({STAT_TYPES[draft.stat].label}). <span style={{ color: "var(--green)" }}>Green</span> = bet would win, <span style={{ color: "var(--red)" }}>red</span> = would lose. Newest first.
-              </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                {draftVals.map((v, i) => <Chip key={i} val={v} hit={draft.side === "over" ? v > draft.line : v < draft.line} />)}
-              </div>
-            </div>
-
-            {/* THE VERDICT — big and clear */}
-            <div style={{ background: "rgba(0,0,0,.3)", borderRadius: 8, padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <span style={{ fontSize: 15, fontWeight: 600 }}>
-                  {STAT_TYPES[draft.stat].label} {draft.side === "over" ? "Over" : "Under"} {draft.line}
-                </span>
-                <span style={{ fontSize: 13, fontWeight: 700, color: dv.color, fontFamily: "'IBM Plex Mono',monospace" }}>{dv.text}</span>
-              </div>
-              <SegBar p={draftProb.p} />
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(2,1fr)", gap: 8 }}>
-                <div style={miniStat}><div style={miniLbl}>Chance it hits</div><div style={{ ...miniVal, color: dv.color }}>{fmtPct(draftProb.p)}</div></div>
-                <div style={miniStat}><div style={miniLbl}>You need (break-even)</div><div style={miniVal}>{fmtPct(impliedProb(draft.odds))}</div></div>
-                <div style={miniStat}><div style={miniLbl}>Your edge</div><div style={{ ...miniVal, color: draftEdge >= 0 ? "var(--green)" : "var(--red)" }}>{draftEdge >= 0 ? "+" : ""}{fmtPct(draftEdge)}</div></div>
-                <div style={miniStat}><div style={miniLbl}>Suggested stake</div><div style={{ ...miniVal, color: "var(--amber)" }}>{fmtCash(draftKelly, sym)}</div></div>
-              </div>
-              <div style={{ fontSize: 11, color: "var(--mut)" }}>
-                {draft.side === "over" ? "Went over" : "Stayed under"} {draftProb.hits} of last {draftProb.n} games · averaging {draftAvg.toFixed(1)} {STAT_TYPES[draft.stat].short}.
-              </div>
-            </div>
-
-            <button
-              onClick={() => addToSlip({ player: draft.player, logs: draft.logs, stat: draft.stat, line: draft.line, side: draft.side, odds: draft.odds, window: draft.window, team: draft.player.team })}
-              disabled={slate.length >= 10}
-              style={{ ...btnPrimary, width: "100%" }}>
-              {slate.length >= 10 ? "10-leg limit" : `+ Add to Parlay Slip (${slate.length}/10)`}
-            </button>
           </section>
         )}
 
         {legs.length > 0 && (
           <section style={panel}>
             <div style={{ ...sectionTitle, display: "flex", justifyContent: "space-between" }}>
-              <span>My Slip — {legs.length}/10 legs</span>
+              <span>My Parlay — {legs.length}/10 legs</span>
               <button onClick={() => setSlate([])} style={{ ...btnGhost, fontSize: 11, padding: "2px 8px" }}>Clear all</button>
             </div>
+            <div style={{ fontSize: 11, color: "var(--red)", fontWeight: 600 }}>⚠ ALL {legs.length} legs must win or the whole parlay loses.</div>
             {legs.map(l => {
               const v = verdict(l.edge);
               return (
@@ -333,7 +322,7 @@ export default function PropDesk() {
         {parlays.length > 0 && (
           <section style={panel}>
             <div style={sectionTitle}>Recommended Parlays</div>
-            <div style={{ fontSize: 11, color: "var(--mut)", marginTop: -4 }}>A parlay combines bets for a bigger payout, but ALL must hit to win. More legs = bigger payout, smaller chance.</div>
+            <div style={{ fontSize: 11, color: "var(--mut)", marginTop: -4 }}>Built only from your positive-edge legs. ALL legs must win to pay out — more legs = bigger payout but much lower chance.</div>
             {parlays.map(pl => {
               const { dec, adjP, ev, extraSameTeam } = priceParlay(pl.legs);
               return (
@@ -349,13 +338,13 @@ export default function PropDesk() {
                   ))}
                   <SegBar p={adjP} />
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
-                    {[["Chance all hit", fmtPct(adjP)], ["Payout multiplier", `${dec.toFixed(2)}x`], [`If you bet ${fmtCash(stake, sym)}`, fmtCash(stake * dec, sym)]].map(([k, v]) => (
+                    {[["Chance ALL hit", fmtPct(adjP)], ["Payout", `${dec.toFixed(2)}x`], [`Bet ${fmtCash(stake, sym)} →`, fmtCash(stake * dec, sym)]].map(([k, v]) => (
                       <div key={k} style={miniStat}><div style={miniLbl}>{k}</div><div style={miniVal}>{v}</div></div>
                     ))}
                   </div>
                   <div style={{ fontSize: 11, color: "var(--mut)" }}>
-                    Bet this {fmtCash(stake, sym)} 100 times: win ~{Math.round(adjP * 100)}, lose ~{100 - Math.round(adjP * 100)} → net {fmtCash((adjP * (dec - 1) - (1 - adjP)) * 100 * stake, sym)}.
-                    {extraSameTeam > 0 && " (Same-team legs adjusted down — they tend to win or lose together.)"}
+                    Bet {fmtCash(stake, sym)} 100 times: win ~{Math.round(adjP * 100)}, lose ~{100 - Math.round(adjP * 100)} → net {fmtCash((adjP * (dec - 1) - (1 - adjP)) * 100 * stake, sym)}.
+                    {extraSameTeam > 0 && " (Same-team legs adjusted down — they tend to move together.)"}
                   </div>
                 </div>
               );
@@ -365,12 +354,12 @@ export default function PropDesk() {
 
         {legs.length >= 2 && parlays.length === 0 && (
           <div style={{ ...panel, color: "var(--mut)", fontSize: 13 }}>
-            No parlay worth recommending — fewer than 2 of your legs beat the odds. That's the app protecting you, not a bug.
+            No parlay worth recommending — fewer than 2 of your legs beat the odds. That's the app protecting you.
           </div>
         )}
 
         <footer style={{ fontSize: 11, color: "var(--mut)", borderTop: "1px solid var(--line)", paddingTop: 12, marginTop: 8 }}>
-          Numbers come from real ESPN game logs. They estimate, they don't predict — a player can always have an off night. Bet only what you can afford to lose.
+          Numbers come from real ESPN game logs. They estimate, they don't predict. Match the app's line to 747's line or the % means nothing. Bet only what you can afford to lose.
         </footer>
       </div>
 
@@ -378,12 +367,13 @@ export default function PropDesk() {
         <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: "#0d1117", borderTop: "2px solid var(--amber)", zIndex: 100 }}>
           <button onClick={() => setSlipOpen(!slipOpen)}
             style={{ width: "100%", background: "transparent", border: "none", color: "var(--amber)", padding: "10px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", fontFamily: "Oswald,sans-serif", fontSize: 15 }}>
-            <span>🎰 MY SLIP — {legs.length} legs</span>
-            {slip && <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 13 }}>{slip.dec.toFixed(2)}x · {fmtPct(slip.adjP)} chance</span>}
+            <span>🎰 MY PARLAY — {legs.length} legs</span>
+            {slip && <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 13 }}>{slip.dec.toFixed(2)}x · {fmtPct(slip.adjP)}</span>}
             <span>{slipOpen ? "▼" : "▲"}</span>
           </button>
           {slipOpen && slip && (
             <div style={{ padding: "0 16px 16px", display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ fontSize: 11, color: "var(--red)", fontWeight: 600 }}>⚠ ALL {legs.length} legs must win.</div>
               {legs.map(l => (
                 <div key={l.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
                   <span>{l.player.name} {STAT_TYPES[l.stat].short} {l.side === "over" ? "O" : "U"}{l.line}</span>
@@ -400,7 +390,7 @@ export default function PropDesk() {
                 </div>
               </div>
               <div style={{ fontSize: 11, color: "var(--mut)" }}>
-                Chance all {legs.length} hit: <b style={{ color: slip.adjP > 0.3 ? "var(--green)" : "var(--amber)" }}>{fmtPct(slip.adjP)}</b> · {slip.ev >= 0 ? "good value ✓" : "the odds are against this ✗"}
+                Chance all {legs.length} hit: <b style={{ color: slip.adjP > 0.3 ? "var(--green)" : "var(--amber)" }}>{fmtPct(slip.adjP)}</b> · {slip.ev >= 0 ? "good value ✓" : "odds against this ✗"}
               </div>
             </div>
           )}
@@ -419,6 +409,7 @@ const card = { background: "rgba(0,0,0,.2)", border: "1px solid var(--line)", bo
 const sectionTitle = { fontSize: 10, textTransform: "uppercase", letterSpacing: "0.15em", color: "var(--amber)", fontFamily: "'IBM Plex Mono',monospace" };
 const teamBtn = { ...btnGhost, padding: "6px 12px", fontSize: 13, fontFamily: "Oswald,sans-serif", fontWeight: 600 };
 const errStyle = { color: "var(--red)", fontSize: 12, background: "rgba(248,113,113,.07)", border: "1px solid rgba(248,113,113,.25)", borderRadius: 6, padding: "8px 12px" };
+const sideBox = { background: "rgba(0,0,0,.3)", border: "1px solid var(--line)", borderRadius: 6, padding: "8px 10px", textAlign: "center", display: "flex", flexDirection: "column", gap: 2 };
 const miniStat = { background: "rgba(0,0,0,.3)", borderRadius: 6, padding: "8px 10px", textAlign: "center" };
 const miniLbl = { fontSize: 9, textTransform: "uppercase", letterSpacing: "0.08em", color: "var(--mut)" };
 const miniVal = { fontFamily: "'IBM Plex Mono',monospace", fontSize: 15, color: "var(--tx)", marginTop: 2 };
