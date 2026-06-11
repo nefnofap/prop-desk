@@ -65,8 +65,7 @@ export default function PropDesk() {
   const pickPlayer = async (p) => {
     setBusy(true); setError(null); setPlayers([]);
     try {
-      // Pass player NAME — server resolves to NBA.com person ID
-      const r = await fetch(`/api/logs?playerName=${encodeURIComponent(p.name)}&n=20`);
+      const r = await fetch(`/api/logs?playerId=${encodeURIComponent(p.id)}&n=20`);
       const d = await r.json();
       if (d.error) throw new Error(d.error);
       setDraft({ player: p, logs: d.logs, stat: "pts", line: 20.5, side: "over", odds: defaultOdds, window: 10 });
@@ -74,7 +73,7 @@ export default function PropDesk() {
   };
 
   const loadRoster = async (teamId, teamCode) => {
-    setBusy(true); setError(null);
+    setBusy(true); setError(null); setPlayers([]);
     try {
       const r = await fetch(`/api/roster?teamId=${teamId}`);
       const d = await r.json();
@@ -303,7 +302,7 @@ export default function PropDesk() {
         )}
 
         <footer style={{ fontSize: 11, color: "var(--mut)", borderTop: "1px solid var(--line)", paddingTop: 12, marginTop: 8 }}>
-          Hit rates from real NBA.com game logs, shrunk toward 50%. *Hit P adjusted for same-team correlation. Bet only what survives being wrong.
+          Hit rates from real ESPN game logs, shrunk toward 50%. *Hit P adjusted for same-team correlation. Bet only what survives being wrong.
         </footer>
       </div>
 
