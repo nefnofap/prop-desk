@@ -148,11 +148,11 @@ export default function PropDesk() {
           <section style={{ ...panel, marginTop: 14 }}>
             <div style={sectionTitle}>How to read this</div>
             <div style={{ fontSize: 13, lineHeight: 1.7, color: "var(--tx)" }}>
-              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>The line</b> is the number you bet over or under. "Over 25.5 points" means he needs 26+.</p>
+              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>The line</b> is the number you bet over or under. "Over 25.5 points" means he needs 26+. "Under" means he stays below it.</p>
               <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Odds (1.91)</b> is your payout multiplier. Bet {sym}100 at 1.91 → get {sym}191 back if it wins ({sym}91 profit). It also sets your <b>break-even</b>: at 1.91 you must win 52% of the time just to not lose money.</p>
-              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Hit %</b> is how often we estimate he goes over, based on his real recent games.</p>
-              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Edge</b> = Hit % minus break-even. If he hits 56% but you only need 52%, that's +4% edge in your favor. <span style={{ color: "var(--green)" }}>Green = good bet</span>, <span style={{ color: "var(--mut)" }}>grey = skip it</span>.</p>
-              <p><b style={{ color: "var(--amber)" }}>Suggested stake</b> uses the Kelly formula — bet bigger when the edge is bigger, capped at 3% of bankroll so one loss never hurts much.</p>
+              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Hit %</b> is how often we estimate the bet wins (over OR under), based on his real recent games.</p>
+              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Edge</b> = Hit % minus break-even. If it hits 56% but you only need 52%, that's +4% edge in your favor. <span style={{ color: "var(--green)" }}>Green = good bet</span>, <span style={{ color: "var(--mut)" }}>grey = skip it</span>.</p>
+              <p><b style={{ color: "var(--amber)" }}>Best bets</b> automatically picks whichever side — over or under — has the better chance for each stat.</p>
             </div>
           </section>
         )}
@@ -204,7 +204,7 @@ export default function PropDesk() {
               <button onClick={() => setDraft(null)} style={{ ...btnGhost, padding: "4px 8px" }}>✕</button>
             </div>
 
-            {/* BEST BETS as readable cards */}
+            {/* BEST BETS as readable cards — picks the stronger side (over/under) */}
             <div>
               <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--amber)", marginBottom: 8, fontFamily: "'IBM Plex Mono',monospace" }}>
                 Best bets right now (at odds {draft.odds})
@@ -212,9 +212,10 @@ export default function PropDesk() {
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 {suggestions.map(s => {
                   const v = verdict(s.edge);
-                  const selected = draft.stat === s.key && draft.line === s.line && draft.side === "over";
+                  const selected = draft.stat === s.key && draft.line === s.line && draft.side === s.side;
+                  const sideLabel = s.side === "over" ? "Over" : "Under";
                   return (
-                    <button key={s.key} onClick={() => setDraft({ ...draft, stat: s.key, line: s.line, side: "over" })}
+                    <button key={s.key} onClick={() => setDraft({ ...draft, stat: s.key, line: s.line, side: s.side })}
                       style={{
                         display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
                         background: selected ? "rgba(251,191,36,.1)" : "rgba(0,0,0,.25)",
@@ -223,10 +224,10 @@ export default function PropDesk() {
                       }}>
                       <div>
                         <div style={{ fontSize: 14, color: "var(--tx)", fontWeight: 600 }}>
-                          {s.label} — Over {s.line}
+                          {s.label} — <span style={{ color: s.side === "over" ? "var(--green)" : "var(--amber)" }}>{sideLabel} {s.line}</span>
                         </div>
                         <div style={{ fontSize: 11, color: "var(--mut)", fontFamily: "'IBM Plex Mono',monospace" }}>
-                          hit {s.hits} of last {s.n} · avg {s.avg.toFixed(1)}
+                          {sideLabel === "Over" ? "went over in" : "stayed under in"} {s.hits} of last {s.n} · avg {s.avg.toFixed(1)}
                         </div>
                       </div>
                       <div style={{ textAlign: "right" }}>
@@ -270,7 +271,7 @@ export default function PropDesk() {
             {/* Game-by-game chips with label */}
             <div>
               <div style={{ fontSize: 10, color: "var(--mut)", marginBottom: 5 }}>
-                Each box = one game ({STAT_TYPES[draft.stat].label}). <span style={{ color: "var(--green)" }}>Green</span> = beat the line, <span style={{ color: "var(--red)" }}>red</span> = missed. Newest first.
+                Each box = one game ({STAT_TYPES[draft.stat].label}). <span style={{ color: "var(--green)" }}>Green</span> = bet would win, <span style={{ color: "var(--red)" }}>red</span> = would lose. Newest first.
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
                 {draftVals.map((v, i) => <Chip key={i} val={v} hit={draft.side === "over" ? v > draft.line : v < draft.line} />)}
@@ -293,7 +294,7 @@ export default function PropDesk() {
                 <div style={miniStat}><div style={miniLbl}>Suggested stake</div><div style={{ ...miniVal, color: "var(--amber)" }}>{fmtCash(draftKelly, sym)}</div></div>
               </div>
               <div style={{ fontSize: 11, color: "var(--mut)" }}>
-                Hit {draftProb.hits} of last {draftProb.n} games · averaging {draftAvg.toFixed(1)} {STAT_TYPES[draft.stat].short}.
+                {draft.side === "over" ? "Went over" : "Stayed under"} {draftProb.hits} of last {draftProb.n} games · averaging {draftAvg.toFixed(1)} {STAT_TYPES[draft.stat].short}.
               </div>
             </div>
 
