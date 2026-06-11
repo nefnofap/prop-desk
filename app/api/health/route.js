@@ -1,26 +1,33 @@
-// GET /api/health — checks NBA.com connectivity (no key needed anymore)
+// GET /api/health — full diagnostic
 import { NBA_HEADERS, CURRENT_SEASON } from "../../../lib/nba";
 export const dynamic = "force-dynamic";
+const KEY = (process.env.BALLDONTLIE_API_KEY || "").trim();
 
 export async function GET() {
-  const check = async (url) => {
+  const get = async (url, headers = {}) => {
     try {
-      const r = await fetch(url, { headers: NBA_HEADERS, cache: "no-store" });
+      const r = await fetch(url, { headers, cache: "no-store" });
       return r.status;
-    } catch (e) { return `error: ${e.message}`; }
+    } catch (e) { return `err:${e.message.slice(0,40)}`; }
   };
 
-  const players = await check(`https://stats.nba.com/stats/commonallplayers?LeagueID=00&Season=${CURRENT_SEASON}&IsOnlyCurrentSeason=1`);
-  // Wembanyama's player ID on NBA.com is 1641705
-  const logs = await check(`https://stats.nba.com/stats/playergamelog?PlayerID=1641705&Season=${CURRENT_SEASON}&SeasonType=Playoffs&LeagueID=00`);
+  const bdlPlayers = await get("https://api.balldontlie.io/v1/players?per_page=1", KEY ? { Authorization: KEY } : {});
+  const nbaPlayers = await get(`https://stats.nba.com/stats/commonallplayers?LeagueID=00&Season=${CURRENT_SEASON}&IsOnlyCurrentSeason=1`, NBA_HEADERS);
+  // Wembanyama NBA ID = 1641705
+  const nbaLogs = await get(`https://stats.nba.com/stats/playergamelog?PlayerID=1641705&Season=${CURRENT_SEASON}&SeasonType=Playoffs&LeagueID=00`, NBA_HEADERS);
 
-  const ok = players === 200 && logs === 200;
+  const searchWorks = bdlPlayers === 200;
+  const logsWork = nbaLogs === 200;
+
   return Response.json({
-    dataSource: "NBA.com stats API (no key required)",
-    playersEndpoint: players,
-    logsEndpoint: logs,
-    verdict: ok
-      ? "All good — search a player to start."
-      : `NBA.com issue — players: ${players}, logs: ${logs}. This is usually a temporary rate-limit; try again in 30 seconds.`,
+    keyPresent: KEY.length > 0,
+    bdlPlayerSearch: bdlPlayers,
+    nbaComPlayerList: nbaPlayers,
+    nbaComGameLogs: nbaLogs,
+    verdict: !searchWorks
+      ? `Player search broken (${bdlPlayers}) — check BALLDONTLIE_API_KEY in Vercel env vars.`
+      : !logsWork
+      ? `Search works but NBA.com game logs return ${nbaLogs} — NBA.com is blocking Vercel's IPs. Need alternative data source.`
+      : "All systems go.",
   });
 }
