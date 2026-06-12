@@ -9,6 +9,17 @@ const fmtPct = (x, dp = 1) => `${(x * 100).toFixed(dp)}%`;
 const fmtCash = (x, sym) => `${sym}${Math.abs(x).toLocaleString("en-PH", { maximumFractionDigits: 0 })}`;
 const TRACK_KEY = "propdesk_bets_v1";
 
+// stat category grouping for the scan board
+const STAT_GROUPS = [
+  { label: "Points", keys: ["pts"] },
+  { label: "Rebounds", keys: ["reb"] },
+  { label: "Assists", keys: ["ast"] },
+  { label: "Threes", keys: ["fg3m"] },
+  { label: "Blocks / Steals", keys: ["blk", "stl", "bs"] },
+  { label: "Combos", keys: ["pra", "pr", "pa", "ra"] },
+  { label: "Turnovers", keys: ["to"] },
+];
+
 function SegBar({ p, segs = 20 }) {
   const lit = Math.round(p * segs);
   const col = p >= 0.56 ? "var(--green)" : p <= 0.44 ? "var(--red)" : "var(--amber)";
@@ -40,6 +51,52 @@ function verdict(edge) {
   return { text: "AVOID", color: "var(--red)" };
 }
 
+// Inline 747 line-check for a single scan result (no need to leave the board)
+function InlineCheck({ item, window_, defaultOdds, onAdd, sym }) {
+  const [stat, setStat] = useState(item.key);
+  const [line, setLine] = useState(String(item.line));
+  const ev = useMemo(() => {
+    if (line === "" || isNaN(Number(line))) return null;
+    return evalLine(item.logs, window_, stat, Number(line), defaultOdds);
+  }, [item, stat, line, window_, defaultOdds]);
+
+  return (
+    <div style={{ background: "rgba(251,191,36,.06)", border: "1px solid rgba(251,191,36,.35)", borderRadius: 8, padding: 10, marginTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: "var(--amber)", fontFamily: "'IBM Plex Mono',monospace" }}>★ CHECK 747'S LINE — {item.player.name}</div>
+      <div style={{ display: "flex", gap: 6 }}>
+        <select value={stat} onChange={e => setStat(e.target.value)} style={{ ...inp, flex: 1, fontSize: 12 }}>
+          {Object.entries(STAT_TYPES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+        </select>
+        <input type="number" step="0.5" value={line} placeholder="747 line" onChange={e => setLine(e.target.value)} style={{ ...inp, flex: 1, fontSize: 12 }} />
+      </div>
+      {ev && (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+            <div style={{ ...sideBox, borderColor: ev.over > ev.under ? "var(--green)" : "var(--line)" }}>
+              <div style={miniLbl}>OVER {ev.line}</div>
+              <div style={{ ...miniVal, fontSize: 18, color: ev.over >= 0.6 ? "var(--green)" : ev.over <= 0.4 ? "var(--red)" : "var(--amber)" }}>{fmtPct(ev.over)}</div>
+              <div style={{ fontSize: 9, color: "var(--mut)" }}>hit {ev.overHits}/{ev.n}</div>
+              <button onClick={() => onAdd(item, stat, ev.line, "over")} style={{ ...btnGhost, fontSize: 10, padding: "4px 6px", marginTop: 4, width: "100%" }}>+ Over</button>
+            </div>
+            <div style={{ ...sideBox, borderColor: ev.under > ev.over ? "var(--green)" : "var(--line)" }}>
+              <div style={miniLbl}>UNDER {ev.line}</div>
+              <div style={{ ...miniVal, fontSize: 18, color: ev.under >= 0.6 ? "var(--green)" : ev.under <= 0.4 ? "var(--red)" : "var(--amber)" }}>{fmtPct(ev.under)}</div>
+              <div style={{ fontSize: 9, color: "var(--mut)" }}>hit {ev.underHits}/{ev.n}</div>
+              <button onClick={() => onAdd(item, stat, ev.line, "under")} style={{ ...btnGhost, fontSize: 10, padding: "4px 6px", marginTop: 4, width: "100%" }}>+ Under</button>
+            </div>
+          </div>
+          <div style={{ fontSize: 11, textAlign: "center", padding: 5, background: "rgba(0,0,0,.25)", borderRadius: 5 }}>
+            Lean: <b style={{ color: verdict(ev.edge).color }}>{ev.best.toUpperCase()} {ev.line}</b> — {verdict(ev.edge).text}
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
+            {ev.vals.map((v, i) => <Chip key={i} val={v} hit={ev.best === "over" ? v > ev.line : v < ev.line} />)}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function PropDesk() {
   const [bankroll, setBankroll] = useState(5000);
   const [sym, setSym] = useState("₱");
@@ -56,7 +113,7 @@ export default function PropDesk() {
   const [slipOpen, setSlipOpen] = useState(false);
   const [stake, setStake] = useState(100);
   const [showHelp, setShowHelp] = useState(false);
-  const [tab, setTab] = useState("build"); // build | tracker
+  const [tab, setTab] = useState("build");
 
   const [bookStat, setBookStat] = useState("pts");
   const [bookLine, setBookLine] = useState("");
@@ -64,14 +121,12 @@ export default function PropDesk() {
   const [scanning, setScanning] = useState(false);
   const [scanResults, setScanResults] = useState(null);
   const [scanLabel, setScanLabel] = useState("");
+  const [scanGroup, setScanGroup] = useState("all");
+  const [openCheck, setOpenCheck] = useState(null); // index of scan row with inline check open
 
-  // ── bet tracker (persisted in browser) ──
   const [tracked, setTracked] = useState([]);
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(TRACK_KEY);
-      if (raw) setTracked(JSON.parse(raw));
-    } catch {}
+    try { const raw = localStorage.getItem(TRACK_KEY); if (raw) setTracked(JSON.parse(raw)); } catch {}
   }, []);
   const saveTracked = (next) => {
     setTracked(next);
@@ -118,7 +173,7 @@ export default function PropDesk() {
   };
 
   const scanTeam = async (teamId, teamCode, label) => {
-    setScanning(true); setError(null); setScanResults(null);
+    setScanning(true); setError(null); setScanResults(null); setOpenCheck(null); setScanGroup("all");
     setScanLabel(label);
     try {
       const rr = await fetch(`/api/roster?teamId=${teamId}`);
@@ -138,7 +193,7 @@ export default function PropDesk() {
         } catch {}
       }
       all.sort((a, b) => b.p - a.p);
-      setScanResults(all.slice(0, 12));
+      setScanResults(all.slice(0, 30));
       setTimeout(() => document.getElementById("scan-board")?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
     } catch (e) { setError(e.message); } finally { setScanning(false); }
   };
@@ -148,6 +203,16 @@ export default function PropDesk() {
     setSlate(prev => [...prev, {
       player: item.player, logs: item.logs, stat: item.key, line: item.line,
       side: item.side, odds: defaultOdds, window: window_, team: item.team, id: Date.now() + Math.random(),
+    }]);
+    setSlipOpen(true);
+  };
+
+  // add from the inline check (custom stat/line/side chosen there)
+  const addFromInline = (item, stat, line, side) => {
+    if (slate.length >= 10) return;
+    setSlate(prev => [...prev, {
+      player: item.player, logs: item.logs, stat, line, side,
+      odds: defaultOdds, window: window_, team: item.team, id: Date.now() + Math.random(),
     }]);
     setSlipOpen(true);
   };
@@ -178,22 +243,31 @@ export default function PropDesk() {
     return evalLine(draft.logs, window_, bookStat, Number(bookLine), draft.odds);
   }, [draft, bookStat, bookLine, window_]);
 
-  // ── tracker actions ──
+  // group + filter scan results
+  const groupedScan = useMemo(() => {
+    if (!scanResults) return null;
+    const filtered = scanGroup === "all"
+      ? scanResults
+      : scanResults.filter(s => (STAT_GROUPS.find(g => g.label === scanGroup)?.keys || []).includes(s.key));
+    return filtered;
+  }, [scanResults, scanGroup]);
+
+  const availableGroups = useMemo(() => {
+    if (!scanResults) return [];
+    return STAT_GROUPS.filter(g => scanResults.some(s => g.keys.includes(s.key)));
+  }, [scanResults]);
+
   const saveBet = () => {
     if (!legs.length) return;
     const dec = legs.reduce((a, l) => a * l.odds, 1);
     const ticket = {
-      id: Date.now(),
-      date: new Date().toISOString().slice(0, 10),
-      stake,
-      dec,
-      payout: stake * dec,
+      id: Date.now(), date: new Date().toISOString().slice(0, 10),
+      stake, dec, payout: stake * dec,
       legs: legs.map(l => ({ name: l.player.name, stat: STAT_TYPES[l.stat].short, side: l.side, line: l.line, p: l.p })),
       status: "pending",
     };
     saveTracked([ticket, ...tracked]);
-    setSlate([]);
-    setTab("tracker");
+    setSlate([]); setTab("tracker");
   };
   const markBet = (id, status) => saveTracked(tracked.map(t => t.id === id ? { ...t, status } : t));
   const delBet = (id) => saveTracked(tracked.filter(t => t.id !== id));
@@ -216,7 +290,6 @@ export default function PropDesk() {
           </div>
           <button onClick={() => setShowHelp(!showHelp)} style={{ ...btnGhost, fontSize: 11, padding: "6px 10px" }}>{showHelp ? "✕" : "❓ Guide"}</button>
         </div>
-        {/* TABS */}
         <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
           <button onClick={() => setTab("build")} style={tab === "build" ? tabOn : tabOff}>Build Bets</button>
           <button onClick={() => setTab("tracker")} style={tab === "tracker" ? tabOn : tabOff}>
@@ -249,15 +322,14 @@ export default function PropDesk() {
           <section style={panel}>
             <div style={sectionTitle}>How to win with this</div>
             <div style={{ fontSize: 13, lineHeight: 1.7 }}>
-              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Fastest:</b> tap "🔍 Best bets" on a game — the app scans every player and ranks the strongest plays.</p>
-              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Check a 747 line:</b> tap a player, type 747's exact number in the gold box.</p>
-              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Track results:</b> save a bet, then mark it Won/Lost in "My Bets" to see if these picks actually make money over time.</p>
+              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Fastest:</b> tap "🔍 Best bets" on a game — results are grouped by stat (points, rebounds…). Tap any pick to check 747's line right there.</p>
+              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Match the line!</b> The app's number must equal 747's, or the % is meaningless.</p>
+              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Track results:</b> save a bet, mark it Won/Lost in "My Bets" to see if these picks actually make money.</p>
               <p style={{ color: "var(--red)" }}>Parlay = ALL legs must win. Screening tool, not a guarantee. Bet only what you can lose.</p>
             </div>
           </section>
         )}
 
-        {/* ───────── TRACKER TAB ───────── */}
         {tab === "tracker" && (
           <>
             <section style={panel}>
@@ -274,7 +346,6 @@ export default function PropDesk() {
                 </div>
               )}
             </section>
-
             <section style={panel}>
               <div style={sectionTitle}>Bet History</div>
               {tracked.length === 0 && <div style={{ color: "var(--mut)", fontSize: 13 }}>No saved bets yet. Build a parlay, then tap "Save to tracker" in the slip.</div>}
@@ -286,20 +357,18 @@ export default function PropDesk() {
                       {t.status === "won" ? "WON ✓" : t.status === "lost" ? "LOST ✗" : "PENDING"}
                     </span>
                   </div>
-                  {t.legs.map((l, i) => (
-                    <div key={i} style={{ fontSize: 12 }}>• {l.name} {l.side === "over" ? "O" : "U"}{l.line} {l.stat} <span style={{ color: "var(--mut)" }}>({fmtPct(l.p)})</span></div>
-                  ))}
+                  {t.legs.map((l, i) => <div key={i} style={{ fontSize: 12 }}>• {l.name} {l.side === "over" ? "O" : "U"}{l.line} {l.stat} <span style={{ color: "var(--mut)" }}>({fmtPct(l.p)})</span></div>)}
                   <div style={{ fontSize: 12, color: "var(--mut)" }}>Bet {fmtCash(t.stake, sym)} → {t.status === "won" ? `won ${fmtCash(t.payout - t.stake, sym)}` : t.status === "lost" ? `lost ${fmtCash(t.stake, sym)}` : `to win ${fmtCash(t.payout - t.stake, sym)}`}</div>
                   {t.status === "pending" ? (
                     <div style={{ display: "flex", gap: 6 }}>
                       <button onClick={() => markBet(t.id, "won")} style={{ ...btnAmber, flex: 1, borderColor: "var(--green)", color: "var(--green)", background: "rgba(52,211,153,.1)" }}>✓ Won</button>
                       <button onClick={() => markBet(t.id, "lost")} style={{ ...btnAmber, flex: 1, borderColor: "var(--red)", color: "var(--red)", background: "rgba(248,113,113,.1)" }}>✗ Lost</button>
-                      <button onClick={() => delBet(t.id)} style={{ ...bigClose }}>🗑</button>
+                      <button onClick={() => delBet(t.id)} style={bigClose}>🗑</button>
                     </div>
                   ) : (
                     <div style={{ display: "flex", gap: 6 }}>
                       <button onClick={() => markBet(t.id, "pending")} style={{ ...btnGhost, fontSize: 11 }}>↺ Undo</button>
-                      <button onClick={() => delBet(t.id)} style={{ ...bigClose }}>🗑 Delete</button>
+                      <button onClick={() => delBet(t.id)} style={bigClose}>🗑 Delete</button>
                     </div>
                   )}
                 </div>
@@ -308,7 +377,6 @@ export default function PropDesk() {
           </>
         )}
 
-        {/* ───────── BUILD TAB ───────── */}
         {tab === "build" && (
           <>
             {games.length > 0 && (
@@ -341,26 +409,47 @@ export default function PropDesk() {
                 </div>
                 {scanning && <div style={{ color: "var(--amber)", fontSize: 13 }}>Scanning roster… ~10-20s.</div>}
                 {scanResults && scanResults.length === 0 && <div style={{ color: "var(--mut)", fontSize: 13 }}>No strong bets cleared the threshold. Try the other team.</div>}
-                {scanResults && scanResults.map((s, i) => {
+
+                {/* CATEGORY FILTER PILLS */}
+                {scanResults && scanResults.length > 0 && (
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    <button onClick={() => setScanGroup("all")} style={scanGroup === "all" ? pillOn : pillOff}>All ({scanResults.length})</button>
+                    {availableGroups.map(g => {
+                      const count = scanResults.filter(s => g.keys.includes(s.key)).length;
+                      return <button key={g.label} onClick={() => setScanGroup(g.label)} style={scanGroup === g.label ? pillOn : pillOff}>{g.label} ({count})</button>;
+                    })}
+                  </div>
+                )}
+
+                {groupedScan && groupedScan.map((s, i) => {
                   const v = verdict(s.edge);
                   const sideLabel = s.side === "over" ? "Over" : "Under";
+                  const rowKey = `${s.player.id}-${s.key}`;
+                  const isOpen = openCheck === rowKey;
                   return (
-                    <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, paddingBottom: 8, borderBottom: "1px solid var(--line)" }}>
-                      <div>
-                        <div style={{ fontSize: 14, fontWeight: 600 }}>{s.player.name} — <span style={{ color: s.side === "over" ? "var(--green)" : "var(--amber)" }}>{sideLabel} {s.line} {s.short}</span></div>
-                        <div style={{ fontSize: 11, color: "var(--mut)", fontFamily: "'IBM Plex Mono',monospace" }}>{sideLabel === "Over" ? "went over" : "stayed under"} {s.hits}/{s.n} · avg {s.avg.toFixed(1)}</div>
-                      </div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <div style={{ textAlign: "right" }}>
-                          <div style={{ fontSize: 16, fontWeight: 700, color: v.color, fontFamily: "'IBM Plex Mono',monospace" }}>{fmtPct(s.p)}</div>
-                          <div style={{ fontSize: 9, color: v.color }}>{v.text}</div>
+                    <div key={rowKey} style={{ borderBottom: "1px solid var(--line)", paddingBottom: 8 }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                        <button onClick={() => setOpenCheck(isOpen ? null : rowKey)}
+                          style={{ flex: 1, textAlign: "left", background: "transparent", border: "none", cursor: "pointer", padding: 0 }}>
+                          <div style={{ fontSize: 14, fontWeight: 600, color: "var(--tx)" }}>
+                            {s.player.name} — <span style={{ color: s.side === "over" ? "var(--green)" : "var(--amber)" }}>{sideLabel} {s.line} {s.short}</span>
+                            <span style={{ fontSize: 11, color: "var(--amber)", marginLeft: 6 }}>{isOpen ? "▲ check" : "▼ check 747"}</span>
+                          </div>
+                          <div style={{ fontSize: 11, color: "var(--mut)", fontFamily: "'IBM Plex Mono',monospace" }}>{sideLabel === "Over" ? "went over" : "stayed under"} {s.hits}/{s.n} · avg {s.avg.toFixed(1)}</div>
+                        </button>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <div style={{ textAlign: "right" }}>
+                            <div style={{ fontSize: 16, fontWeight: 700, color: v.color, fontFamily: "'IBM Plex Mono',monospace" }}>{fmtPct(s.p)}</div>
+                            <div style={{ fontSize: 9, color: v.color }}>{v.text}</div>
+                          </div>
+                          <button onClick={() => addLegFromScan(s)} disabled={slate.length >= 10} style={{ ...btnAmber, padding: "8px 12px", fontSize: 16 }}>+</button>
                         </div>
-                        <button onClick={() => addLegFromScan(s)} disabled={slate.length >= 10} style={{ ...btnAmber, padding: "8px 12px", fontSize: 16 }}>+</button>
                       </div>
+                      {isOpen && <InlineCheck item={s} window_={window_} defaultOdds={defaultOdds} onAdd={addFromInline} sym={sym} />}
                     </div>
                   );
                 })}
-                {scanResults && scanResults.length > 0 && <div style={{ fontSize: 11, color: "var(--mut)" }}>App's own lines — confirm against 747 before betting.</div>}
+                {scanResults && scanResults.length > 0 && <div style={{ fontSize: 11, color: "var(--mut)" }}>Tap any pick to check 747's exact line. App's own lines shown by default — confirm before betting.</div>}
               </section>
             )}
 
@@ -494,7 +583,6 @@ export default function PropDesk() {
         </footer>
       </div>
 
-      {/* STICKY SLIP */}
       {legs.length > 0 && tab === "build" && (
         <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: "#0d1117", borderTop: "2px solid var(--amber)", zIndex: 100 }}>
           <button onClick={() => setSlipOpen(!slipOpen)} style={{ width: "100%", background: "transparent", border: "none", color: "var(--amber)", padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", fontFamily: "Oswald,sans-serif", fontSize: 15 }}>
@@ -548,6 +636,8 @@ const btnGhost = { background: "transparent", border: "1px solid var(--line)", b
 const bigClose = { background: "rgba(248,113,113,.1)", border: "1px solid rgba(248,113,113,.3)", borderRadius: 6, color: "var(--red)", padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" };
 const tabOn = { flex: 1, background: "var(--amber)", color: "#0a0e14", border: "none", borderRadius: 6, padding: "8px", fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "Oswald,sans-serif" };
 const tabOff = { flex: 1, background: "transparent", color: "var(--mut)", border: "1px solid var(--line)", borderRadius: 6, padding: "8px", fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "Oswald,sans-serif" };
+const pillOn = { background: "var(--green)", color: "#0a0e14", border: "none", borderRadius: 20, padding: "5px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" };
+const pillOff = { background: "transparent", color: "var(--mut)", border: "1px solid var(--line)", borderRadius: 20, padding: "5px 12px", fontSize: 11, cursor: "pointer" };
 const panel = { background: "#11161f", border: "1px solid var(--line)", borderRadius: 10, padding: 14, marginBottom: 14, display: "flex", flexDirection: "column", gap: 12 };
 const card = { background: "rgba(0,0,0,.2)", border: "1px solid var(--line)", borderRadius: 8, padding: 12, display: "flex", flexDirection: "column", gap: 8 };
 const sectionTitle = { fontSize: 10, textTransform: "uppercase", letterSpacing: "0.15em", color: "var(--amber)", fontFamily: "'IBM Plex Mono',monospace" };
