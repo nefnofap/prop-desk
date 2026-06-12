@@ -14,8 +14,13 @@ const STAT_GROUPS = [
   { label: "Rebounds", keys: ["reb"] },
   { label: "Assists", keys: ["ast"] },
   { label: "Threes", keys: ["fg3m"] },
-  { label: "Blocks / Steals", keys: ["blk", "stl", "bs"] },
-  { label: "Combos", keys: ["pra", "pr", "pa", "ra"] },
+  { label: "Blocks", keys: ["blk"] },
+  { label: "Steals", keys: ["stl"] },
+  { label: "Blocks+Steals", keys: ["bs"] },
+  { label: "Pts+Reb+Ast", keys: ["pra"] },
+  { label: "Pts+Reb", keys: ["pr"] },
+  { label: "Pts+Ast", keys: ["pa"] },
+  { label: "Reb+Ast", keys: ["ra"] },
   { label: "Turnovers", keys: ["to"] },
 ];
 
