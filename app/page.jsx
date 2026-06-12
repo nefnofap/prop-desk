@@ -3,6 +3,7 @@ import { useState, useMemo, useEffect } from "react";
 import {
   STAT_TYPES, impliedProb, weightedShrunkProb, kellyStake,
   priceParlay, recommendParlays, autoSuggest, evalLine, parseSlip,
+  evalMoneyline, evalSpread, evalTotal, evalTeamTotal, evalOddEven,
 } from "../lib/engine";
 
 const fmtPct = (x, dp = 1) => `${(x * 100).toFixed(dp)}%`;
@@ -128,10 +129,20 @@ export default function PropDesk() {
   const [minHits, setMinHits] = useState(0);
   const [openCheck, setOpenCheck] = useState(null);
 
-  // paste-slip state
   const [pasteText, setPasteText] = useState("");
   const [pasteBusy, setPasteBusy] = useState(false);
   const [pasteResults, setPasteResults] = useState(null);
+
+  // ── team bets state ──
+  const [teamBusy, setTeamBusy] = useState(false);
+  const [teamGame, setTeamGame] = useState(null);   // { away, home, awayId, homeId }
+  const [teamData, setTeamData] = useState(null);    // { away:{team,games}, home:{team,games} }
+  const [tbType, setTbType] = useState("spread");    // spread | total | moneyline | teamtotal | oddeven
+  const [tbSubject, setTbSubject] = useState("away"); // which team the bet is about
+  const [tbLine, setTbLine] = useState("");
+  const [tbSide, setTbSide] = useState("over");      // for totals
+  const [tbWhich, setTbWhich] = useState("even");    // for odd/even
+  const [tbOdds, setTbOdds] = useState(1.91);
 
   const [tracked, setTracked] = useState([]);
   useEffect(() => {
@@ -207,22 +218,31 @@ export default function PropDesk() {
     } catch (e) { setError(e.message); } finally { setScanning(false); }
   };
 
-  // ── paste slip: parse, resolve each player, evaluate each leg ──
+  // ── team bets: load both teams' recent games ──
+  const loadTeamGame = async (g) => {
+    setTeamBusy(true); setError(null); setTeamData(null);
+    setTeamGame(g); setTbLine(""); setTbType("spread"); setTbSubject("away");
+    try {
+      const [ra, rh] = await Promise.all([
+        fetch(`/api/team-games?teamId=${g.awayId}&n=15`).then(r => r.json()),
+        fetch(`/api/team-games?teamId=${g.homeId}&n=15`).then(r => r.json()),
+      ]);
+      if (ra.error || rh.error) throw new Error(ra.error || rh.error);
+      setTeamData({ away: ra, home: rh });
+    } catch (e) { setError(e.message); } finally { setTeamBusy(false); }
+  };
+
   const analyzeSlip = async () => {
     const parsed = parseSlip(pasteText);
     if (!parsed.length) { setError("Couldn't read any legs. Check the format."); return; }
     setPasteBusy(true); setError(null); setPasteResults(null);
     const out = [];
     for (const leg of parsed) {
-      if (leg.error || !leg.stat || !leg.side || leg.line == null) {
-        out.push({ ...leg, status: "unparsed" });
-        continue;
-      }
+      if (leg.error || !leg.stat || !leg.side || leg.line == null) { out.push({ ...leg, status: "unparsed" }); continue; }
       try {
         const sr = await fetch(`/api/player?q=${encodeURIComponent(leg.name)}`);
         const sd = await sr.json();
         let player = (sd.players || [])[0];
-        // fallback: retry on last name only (handles "D. Fox" → "Fox")
         if (!player) {
           const last = leg.name.split(/\s+/).pop();
           if (last && last.length > 2) {
@@ -239,9 +259,7 @@ export default function PropDesk() {
         const p = leg.side === "over" ? ev.over : ev.under;
         const hits = leg.side === "over" ? ev.overHits : ev.underHits;
         out.push({ ...leg, player, logs: ld.logs, p, hits, n: ev.n, vals: ev.vals, status: "ok" });
-      } catch {
-        out.push({ ...leg, status: "error" });
-      }
+      } catch { out.push({ ...leg, status: "error" }); }
     }
     setPasteResults(out);
     setPasteBusy(false);
@@ -319,6 +337,23 @@ export default function PropDesk() {
     return { naiveP, adjP, dec, legs: ok.length, extraSameTeam };
   }, [pasteResults, defaultOdds]);
 
+  // ── team bet evaluation ──
+  const teamBetEval = useMemo(() => {
+    if (!teamData) return null;
+    const subj = tbSubject === "away" ? teamData.away : teamData.home;
+    const gamesArr = subj?.games || [];
+    if (!gamesArr.length) return null;
+    const odds = Number(tbOdds) || 1.91;
+    const ln = Number(tbLine);
+    if (tbType === "moneyline") return { ...evalMoneyline(gamesArr, odds), teamName: subj.team };
+    if (tbType === "oddeven") return { ...evalOddEven(gamesArr, tbWhich, odds), teamName: subj.team };
+    if (tbLine === "" || isNaN(ln)) return null;
+    if (tbType === "spread") return { ...evalSpread(gamesArr, ln, odds), teamName: subj.team };
+    if (tbType === "total") return { ...evalTotal(gamesArr, ln, tbSide, odds), teamName: subj.team };
+    if (tbType === "teamtotal") return { ...evalTeamTotal(gamesArr, ln, tbSide, odds), teamName: subj.team };
+    return null;
+  }, [teamData, tbSubject, tbType, tbLine, tbSide, tbWhich, tbOdds]);
+
   const saveBet = () => {
     if (!legs.length) return;
     const dec = legs.reduce((a, l) => a * l.odds, 1);
@@ -345,6 +380,20 @@ export default function PropDesk() {
     setPasteResults(null); setPasteText(""); setTab("tracker");
   };
 
+  const saveTeamBet = () => {
+    if (!teamBetEval) return;
+    const desc = teamBetLabel(teamBetEval, tbType, tbSubject, teamGame, tbLine, tbSide, tbWhich);
+    const dec = Number(tbOdds) || 1.91;
+    const ticket = {
+      id: Date.now(), date: new Date().toISOString().slice(0, 10),
+      stake, dec, payout: stake * dec,
+      legs: [{ name: teamBetEval.teamName, stat: desc, side: "", line: "", p: teamBetEval.p }],
+      status: "pending",
+    };
+    saveTracked([ticket, ...tracked]);
+    setTab("tracker");
+  };
+
   const markBet = (id, status) => saveTracked(tracked.map(t => t.id === id ? { ...t, status } : t));
   const delBet = (id) => saveTracked(tracked.filter(t => t.id !== id));
 
@@ -366,11 +415,12 @@ export default function PropDesk() {
           </div>
           <button onClick={() => setShowHelp(!showHelp)} style={{ ...btnGhost, fontSize: 11, padding: "6px 10px" }}>{showHelp ? "✕" : "❓ Guide"}</button>
         </div>
-        <div style={{ display: "flex", gap: 5, marginTop: 10 }}>
-          <button onClick={() => setTab("build")} style={tab === "build" ? tabOn : tabOff}>Build</button>
-          <button onClick={() => setTab("paste")} style={tab === "paste" ? tabOn : tabOff}>Paste Slip</button>
+        <div style={{ display: "flex", gap: 5, marginTop: 10, flexWrap: "wrap" }}>
+          <button onClick={() => setTab("build")} style={tab === "build" ? tabOn : tabOff}>Player</button>
+          <button onClick={() => setTab("team")} style={tab === "team" ? tabOn : tabOff}>Team</button>
+          <button onClick={() => setTab("paste")} style={tab === "paste" ? tabOn : tabOff}>Paste</button>
           <button onClick={() => setTab("tracker")} style={tab === "tracker" ? tabOn : tabOff}>
-            My Bets {tracked.length > 0 && `(${record.won}-${record.lost})`}
+            Bets {tracked.length > 0 && `(${record.won}-${record.lost})`}
           </button>
         </div>
         {tab !== "tracker" && (
@@ -399,12 +449,99 @@ export default function PropDesk() {
           <section style={panel}>
             <div style={sectionTitle}>How to win with this</div>
             <div style={{ fontSize: 13, lineHeight: 1.7 }}>
-              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Paste Slip:</b> copy your whole 747 bet slip, paste it in the "Paste Slip" tab, and see the win rate of every leg + the full parlay at once.</p>
-              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Best bets:</b> tap "🔍 Best bets" on a game — results grouped by stat. Filter by minimum hit rate (6+, 7+, 8+). Tap any pick to check 747's line.</p>
-              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Track:</b> save a bet, mark it Won/Lost to see if these picks actually make money.</p>
-              <p style={{ color: "var(--red)" }}>Parlay = ALL legs must win. Screening tool, not a guarantee. Bet only what you can lose.</p>
+              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Player tab:</b> scan a team for best player props, or search a player and check 747's line.</p>
+              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Team tab:</b> pick a game, type 747's spread / total / moneyline, see how often it hit recently.</p>
+              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Paste tab:</b> paste a whole 747 slip for instant per-leg + parlay win rates.</p>
+              <p style={{ color: "var(--red)" }}>Team bets are blunter than player props — opponent matters a lot. Treat as a rough lean. Bet only what you can lose.</p>
             </div>
           </section>
+        )}
+
+        {/* ───────── TEAM BETS TAB ───────── */}
+        {tab === "team" && (
+          <>
+            <section style={panel}>
+              <div style={sectionTitle}>Pick a game</div>
+              {games.length === 0 && <div style={{ color: "var(--mut)", fontSize: 13 }}>No games scheduled right now. Team bets need an upcoming game.</div>}
+              {games.map(g => (
+                <button key={g.id} onClick={() => loadTeamGame(g)}
+                  style={{ ...btnGhost, textAlign: "left", padding: "10px 12px",
+                    borderColor: teamGame?.id === g.id ? "var(--amber)" : "var(--line)",
+                    background: teamGame?.id === g.id ? "rgba(251,191,36,.08)" : "transparent" }}>
+                  <span style={{ fontFamily: "Oswald,sans-serif", fontSize: 14 }}>{g.away} @ {g.home}</span>
+                  <span style={{ color: "var(--mut)", fontSize: 11, marginLeft: 8 }}>{g.status}</span>
+                </button>
+              ))}
+              {teamBusy && <div style={{ color: "var(--amber)", fontSize: 13 }}>Loading team results…</div>}
+              {error && <div style={errStyle}>{error}</div>}
+            </section>
+
+            {teamData && teamGame && (
+              <section style={{ ...panel, border: "1px solid rgba(251,191,36,.4)" }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "var(--amber)", fontFamily: "Oswald,sans-serif" }}>★ CHECK 747'S TEAM LINE</div>
+
+                {/* bet type */}
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {[["spread","Spread"],["total","Total (both)"],["teamtotal","Team Points"],["moneyline","Money Line"],["oddeven","Odd/Even"]].map(([k,labelTxt]) => (
+                    <button key={k} onClick={() => { setTbType(k); setTbLine(""); }} style={tbType === k ? pillOn : pillOff}>{labelTxt}</button>
+                  ))}
+                </div>
+
+                {/* which team (not needed for total) */}
+                {tbType !== "total" && (
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <button onClick={() => setTbSubject("away")} style={tbSubject === "away" ? pillSmOn : pillSmOff}>{teamGame.away}</button>
+                    <button onClick={() => setTbSubject("home")} style={tbSubject === "home" ? pillSmOn : pillSmOff}>{teamGame.home}</button>
+                  </div>
+                )}
+
+                {/* inputs per type */}
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
+                  {(tbType === "spread" || tbType === "total" || tbType === "teamtotal") && (
+                    <label style={lbl}>747 line
+                      <input type="number" step="0.5" value={tbLine} placeholder={tbType === "spread" ? "-6.5" : "215.5"} onChange={e => setTbLine(e.target.value)} style={{ ...inp, width: 90 }} />
+                    </label>
+                  )}
+                  {(tbType === "total" || tbType === "teamtotal") && (
+                    <label style={lbl}>Side
+                      <select value={tbSide} onChange={e => setTbSide(e.target.value)} style={{ ...inp, width: 90 }}>
+                        <option value="over">Over</option><option value="under">Under</option>
+                      </select>
+                    </label>
+                  )}
+                  {tbType === "oddeven" && (
+                    <label style={lbl}>Odd / Even
+                      <select value={tbWhich} onChange={e => setTbWhich(e.target.value)} style={{ ...inp, width: 90 }}>
+                        <option value="even">Even</option><option value="odd">Odd</option>
+                      </select>
+                    </label>
+                  )}
+                  <label style={lbl}>747 odds
+                    <input type="number" step="0.01" value={tbOdds} onChange={e => setTbOdds(Number(e.target.value) || 1.91)} style={{ ...inp, width: 80 }} />
+                  </label>
+                </div>
+
+                {teamBetEval && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    <SegBar p={teamBetEval.p} />
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
+                      <div style={miniStat}><div style={miniLbl}>Hit rate</div><div style={{ ...miniVal, color: verdict(teamBetEval.edge).color }}>{fmtPct(teamBetEval.p)}</div></div>
+                      <div style={miniStat}><div style={miniLbl}>Break-even</div><div style={miniVal}>{fmtPct(impliedProb(Number(tbOdds) || 1.91))}</div></div>
+                      <div style={miniStat}><div style={miniLbl}>Edge</div><div style={{ ...miniVal, color: teamBetEval.edge >= 0 ? "var(--green)" : "var(--red)" }}>{teamBetEval.edge >= 0 ? "+" : ""}{fmtPct(teamBetEval.edge)}</div></div>
+                    </div>
+                    <div style={{ fontSize: 12, textAlign: "center", padding: 6, background: "rgba(0,0,0,.25)", borderRadius: 6 }}>
+                      {teamBetSummary(teamBetEval, tbType, tbSide, tbWhich)} — <b style={{ color: verdict(teamBetEval.edge).color }}>{verdict(teamBetEval.edge).text}</b>
+                    </div>
+                    <button onClick={saveTeamBet} style={{ ...btnPrimary, width: "100%" }}>💾 Save to tracker</button>
+                  </div>
+                )}
+
+                <div style={{ fontSize: 11, color: "var(--red)" }}>
+                  ⚠ Team results swing hard on opponent — beating a weak team by 20 says little about covering vs a strong one. Treat as a rough lean only.
+                </div>
+              </section>
+            )}
+          </>
         )}
 
         {/* ───────── PASTE SLIP TAB ───────── */}
@@ -451,7 +588,7 @@ export default function PropDesk() {
                       return (
                         <div key={i} style={{ ...card, borderColor: "rgba(248,113,113,.3)" }}>
                           <div style={{ fontSize: 13 }}>{r.name || r.raw}</div>
-                          <div style={{ fontSize: 11, color: "var(--red)" }}>⚠ {msg} — check spelling or analyze this one manually in Build.</div>
+                          <div style={{ fontSize: 11, color: "var(--red)" }}>⚠ {msg} — check spelling or analyze this one manually in Player tab.</div>
                         </div>
                       );
                     }
@@ -499,7 +636,7 @@ export default function PropDesk() {
             </section>
             <section style={panel}>
               <div style={sectionTitle}>Bet History</div>
-              {tracked.length === 0 && <div style={{ color: "var(--mut)", fontSize: 13 }}>No saved bets yet. Build or paste a parlay, then tap "Save to tracker".</div>}
+              {tracked.length === 0 && <div style={{ color: "var(--mut)", fontSize: 13 }}>No saved bets yet. Build, paste, or analyze a team bet, then tap "Save to tracker".</div>}
               {tracked.map(t => (
                 <div key={t.id} style={{ ...card, borderColor: t.status === "won" ? "rgba(52,211,153,.4)" : t.status === "lost" ? "rgba(248,113,113,.4)" : "var(--line)" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -508,7 +645,7 @@ export default function PropDesk() {
                       {t.status === "won" ? "WON ✓" : t.status === "lost" ? "LOST ✗" : "PENDING"}
                     </span>
                   </div>
-                  {t.legs.map((l, i) => <div key={i} style={{ fontSize: 12 }}>• {l.name} {l.side === "over" ? "O" : "U"}{l.line} {l.stat} <span style={{ color: "var(--mut)" }}>({fmtPct(l.p)})</span></div>)}
+                  {t.legs.map((l, i) => <div key={i} style={{ fontSize: 12 }}>• {l.name} {l.side === "over" ? "O" : l.side === "under" ? "U" : ""}{l.line} {l.stat} <span style={{ color: "var(--mut)" }}>({fmtPct(l.p)})</span></div>)}
                   <div style={{ fontSize: 12, color: "var(--mut)" }}>Bet {fmtCash(t.stake, sym)} → {t.status === "won" ? `won ${fmtCash(t.payout - t.stake, sym)}` : t.status === "lost" ? `lost ${fmtCash(t.stake, sym)}` : `to win ${fmtCash(t.payout - t.stake, sym)}`}</div>
                   {t.status === "pending" ? (
                     <div style={{ display: "flex", gap: 6 }}>
@@ -570,7 +707,6 @@ export default function PropDesk() {
                         return <button key={g.label} onClick={() => setScanGroup(g.label)} style={scanGroup === g.label ? pillOn : pillOff}>{g.label} ({count})</button>;
                       })}
                     </div>
-                    {/* HIT-RATE FILTER */}
                     <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
                       <span style={{ fontSize: 10, color: "var(--mut)", textTransform: "uppercase", letterSpacing: "0.1em" }}>Min hits:</span>
                       {[0, 6, 7, 8, 9, 10].map(h => (
@@ -791,6 +927,25 @@ export default function PropDesk() {
       )}
     </div>
   );
+}
+
+// ── team-bet text helpers ──
+function teamBetSummary(ev, type, side, which) {
+  if (type === "moneyline") return `${ev.teamName} won ${ev.wins}/${ev.n} recent`;
+  if (type === "spread") return `Covered ${ev.line > 0 ? "+" : ""}${ev.line} in ${ev.covers}/${ev.n} (avg margin ${ev.avgMargin.toFixed(1)})`;
+  if (type === "total") return `${side === "over" ? "Over" : "Under"} hit ${side === "over" ? ev.overs : ev.unders}/${ev.n} (avg total ${ev.avgTotal.toFixed(0)})`;
+  if (type === "teamtotal") return `${side === "over" ? "Over" : "Under"} hit ${side === "over" ? ev.overs : ev.unders}/${ev.n} (avg ${ev.avgScore.toFixed(0)})`;
+  if (type === "oddeven") return `${which === "even" ? "Even" : "Odd"} in ${ev.hits}/${ev.n} recent`;
+  return "";
+}
+function teamBetLabel(ev, type, subject, game, line, side, which) {
+  const t = ev.teamName;
+  if (type === "moneyline") return `${t} ML`;
+  if (type === "spread") return `${t} ${line > 0 ? "+" : ""}${line}`;
+  if (type === "total") return `Total ${side} ${line}`;
+  if (type === "teamtotal") return `${t} team ${side} ${line}`;
+  if (type === "oddeven") return `${t} ${which}`;
+  return t;
 }
 
 const inp = { background: "#0c1118", border: "1px solid var(--line)", borderRadius: 6, color: "var(--tx)", padding: "9px 10px", fontSize: 13, fontFamily: "'IBM Plex Mono',monospace", width: "100%", boxSizing: "border-box" };
