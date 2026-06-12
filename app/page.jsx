@@ -120,6 +120,7 @@ export default function PropDesk() {
   const [scanResults, setScanResults] = useState(null);
   const [scanLabel, setScanLabel] = useState("");
   const [scanGroup, setScanGroup] = useState("all");
+  const [minHits, setMinHits] = useState(0);
   const [openCheck, setOpenCheck] = useState(null);
 
   // paste-slip state
@@ -176,7 +177,7 @@ export default function PropDesk() {
   };
 
   const scanTeam = async (teamId, teamCode, label) => {
-    setScanning(true); setError(null); setScanResults(null); setOpenCheck(null); setScanGroup("all");
+    setScanning(true); setError(null); setScanResults(null); setOpenCheck(null); setScanGroup("all"); setMinHits(0);
     setScanLabel(label);
     try {
       const rr = await fetch(`/api/roster?teamId=${teamId}`);
@@ -215,7 +216,16 @@ export default function PropDesk() {
       try {
         const sr = await fetch(`/api/player?q=${encodeURIComponent(leg.name)}`);
         const sd = await sr.json();
-        const player = (sd.players || [])[0];
+        let player = (sd.players || [])[0];
+        // fallback: retry on last name only (handles "D. Fox" → "Fox")
+        if (!player) {
+          const last = leg.name.split(/\s+/).pop();
+          if (last && last.length > 2) {
+            const sr2 = await fetch(`/api/player?q=${encodeURIComponent(last)}`);
+            const sd2 = await sr2.json();
+            player = (sd2.players || [])[0];
+          }
+        }
         if (!player) { out.push({ ...leg, status: "noplayer" }); continue; }
         const lr = await fetch(`/api/logs?playerId=${encodeURIComponent(player.id)}&n=20`);
         const ld = await lr.json();
@@ -278,17 +288,20 @@ export default function PropDesk() {
 
   const groupedScan = useMemo(() => {
     if (!scanResults) return null;
-    return scanGroup === "all"
-      ? scanResults
-      : scanResults.filter(s => (STAT_GROUPS.find(g => g.label === scanGroup)?.keys || []).includes(s.key));
-  }, [scanResults, scanGroup]);
+    let f = scanResults;
+    if (scanGroup !== "all") {
+      const keys = STAT_GROUPS.find(g => g.label === scanGroup)?.keys || [];
+      f = f.filter(s => keys.includes(s.key));
+    }
+    if (minHits > 0) f = f.filter(s => s.hits >= minHits);
+    return f;
+  }, [scanResults, scanGroup, minHits]);
 
   const availableGroups = useMemo(() => {
     if (!scanResults) return [];
     return STAT_GROUPS.filter(g => scanResults.some(s => g.keys.includes(s.key)));
   }, [scanResults]);
 
-  // parlay win rate for pasted slip (only legs that parsed OK)
   const pasteParlay = useMemo(() => {
     if (!pasteResults) return null;
     const ok = pasteResults.filter(r => r.status === "ok");
@@ -314,7 +327,6 @@ export default function PropDesk() {
     setSlate([]); setTab("tracker");
   };
 
-  // save pasted slip straight to tracker
   const savePasteSlip = () => {
     if (!pasteParlay) return;
     const ok = pasteResults.filter(r => r.status === "ok");
@@ -383,7 +395,7 @@ export default function PropDesk() {
             <div style={sectionTitle}>How to win with this</div>
             <div style={{ fontSize: 13, lineHeight: 1.7 }}>
               <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Paste Slip:</b> copy your whole 747 bet slip, paste it in the "Paste Slip" tab, and see the win rate of every leg + the full parlay at once.</p>
-              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Best bets:</b> tap "🔍 Best bets" on a game — results grouped by stat. Tap any pick to check 747's line.</p>
+              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Best bets:</b> tap "🔍 Best bets" on a game — results grouped by stat. Filter by minimum hit rate (6+, 7+, 8+). Tap any pick to check 747's line.</p>
               <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Track:</b> save a bet, mark it Won/Lost to see if these picks actually make money.</p>
               <p style={{ color: "var(--red)" }}>Parlay = ALL legs must win. Screening tool, not a guarantee. Bet only what you can lose.</p>
             </div>
@@ -410,7 +422,6 @@ export default function PropDesk() {
 
             {pasteResults && (
               <>
-                {/* PARLAY WIN RATE — top summary */}
                 {pasteParlay && (
                   <section style={{ ...panel, border: "1px solid rgba(251,191,36,.4)" }}>
                     <div style={{ ...sectionTitle, color: "var(--amber)" }}>Parlay win rate — {pasteParlay.legs} legs</div>
@@ -427,7 +438,6 @@ export default function PropDesk() {
                   </section>
                 )}
 
-                {/* PER-LEG breakdown */}
                 <section style={panel}>
                   <div style={sectionTitle}>Each leg's win rate</div>
                   {pasteResults.map((r, i) => {
@@ -547,13 +557,28 @@ export default function PropDesk() {
                 {scanResults && scanResults.length === 0 && <div style={{ color: "var(--mut)", fontSize: 13 }}>No strong bets cleared the threshold. Try the other team.</div>}
 
                 {scanResults && scanResults.length > 0 && (
-                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                    <button onClick={() => setScanGroup("all")} style={scanGroup === "all" ? pillOn : pillOff}>All ({scanResults.length})</button>
-                    {availableGroups.map(g => {
-                      const count = scanResults.filter(s => g.keys.includes(s.key)).length;
-                      return <button key={g.label} onClick={() => setScanGroup(g.label)} style={scanGroup === g.label ? pillOn : pillOff}>{g.label} ({count})</button>;
-                    })}
-                  </div>
+                  <>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      <button onClick={() => setScanGroup("all")} style={scanGroup === "all" ? pillOn : pillOff}>All ({scanResults.length})</button>
+                      {availableGroups.map(g => {
+                        const count = scanResults.filter(s => g.keys.includes(s.key)).length;
+                        return <button key={g.label} onClick={() => setScanGroup(g.label)} style={scanGroup === g.label ? pillOn : pillOff}>{g.label} ({count})</button>;
+                      })}
+                    </div>
+                    {/* HIT-RATE FILTER */}
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                      <span style={{ fontSize: 10, color: "var(--mut)", textTransform: "uppercase", letterSpacing: "0.1em" }}>Min hits:</span>
+                      {[0, 6, 7, 8, 9, 10].map(h => (
+                        <button key={h} onClick={() => setMinHits(h)} style={minHits === h ? pillSmOn : pillSmOff}>
+                          {h === 0 ? "Any" : `${h}+`}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+
+                {groupedScan && groupedScan.length === 0 && scanResults.length > 0 && (
+                  <div style={{ color: "var(--mut)", fontSize: 13 }}>None match this filter. Lower the min-hits or pick another stat.</div>
                 )}
 
                 {groupedScan && groupedScan.map((s) => {
@@ -773,6 +798,8 @@ const tabOn = { flex: 1, background: "var(--amber)", color: "#0a0e14", border: "
 const tabOff = { flex: 1, background: "transparent", color: "var(--mut)", border: "1px solid var(--line)", borderRadius: 6, padding: "8px 4px", fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "Oswald,sans-serif" };
 const pillOn = { background: "var(--green)", color: "#0a0e14", border: "none", borderRadius: 20, padding: "5px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" };
 const pillOff = { background: "transparent", color: "var(--mut)", border: "1px solid var(--line)", borderRadius: 20, padding: "5px 12px", fontSize: 11, cursor: "pointer" };
+const pillSmOn = { background: "var(--amber)", color: "#0a0e14", border: "none", borderRadius: 20, padding: "4px 10px", fontSize: 11, fontWeight: 700, cursor: "pointer" };
+const pillSmOff = { background: "transparent", color: "var(--mut)", border: "1px solid var(--line)", borderRadius: 20, padding: "4px 10px", fontSize: 11, cursor: "pointer" };
 const panel = { background: "#11161f", border: "1px solid var(--line)", borderRadius: 10, padding: 14, marginBottom: 14, display: "flex", flexDirection: "column", gap: 12 };
 const card = { background: "rgba(0,0,0,.2)", border: "1px solid var(--line)", borderRadius: 8, padding: 12, display: "flex", flexDirection: "column", gap: 8 };
 const sectionTitle = { fontSize: 10, textTransform: "uppercase", letterSpacing: "0.15em", color: "var(--amber)", fontFamily: "'IBM Plex Mono',monospace" };
