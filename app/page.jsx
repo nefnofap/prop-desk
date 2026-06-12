@@ -7,6 +7,7 @@ import {
 
 const fmtPct = (x, dp = 1) => `${(x * 100).toFixed(dp)}%`;
 const fmtCash = (x, sym) => `${sym}${Math.abs(x).toLocaleString("en-PH", { maximumFractionDigits: 0 })}`;
+const TRACK_KEY = "propdesk_bets_v1";
 
 function SegBar({ p, segs = 20 }) {
   const lit = Math.round(p * segs);
@@ -45,6 +46,7 @@ export default function PropDesk() {
   const [defaultOdds, setDefaultOdds] = useState(1.91);
   const [query, setQuery] = useState("");
   const [players, setPlayers] = useState([]);
+  const [listLabel, setListLabel] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [slate, setSlate] = useState([]);
@@ -54,14 +56,27 @@ export default function PropDesk() {
   const [slipOpen, setSlipOpen] = useState(false);
   const [stake, setStake] = useState(100);
   const [showHelp, setShowHelp] = useState(false);
+  const [tab, setTab] = useState("build"); // build | tracker
 
   const [bookStat, setBookStat] = useState("pts");
   const [bookLine, setBookLine] = useState("");
 
-  // scanner
   const [scanning, setScanning] = useState(false);
   const [scanResults, setScanResults] = useState(null);
   const [scanLabel, setScanLabel] = useState("");
+
+  // ── bet tracker (persisted in browser) ──
+  const [tracked, setTracked] = useState([]);
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(TRACK_KEY);
+      if (raw) setTracked(JSON.parse(raw));
+    } catch {}
+  }, []);
+  const saveTracked = (next) => {
+    setTracked(next);
+    try { localStorage.setItem(TRACK_KEY, JSON.stringify(next)); } catch {}
+  };
 
   useEffect(() => {
     fetch("/api/games").then(r => r.json()).then(d => setGames(d.games || [])).catch(() => {});
@@ -70,18 +85,18 @@ export default function PropDesk() {
   const search = async (q) => {
     const sq = (q || query).trim();
     if (!sq) return;
-    setBusy(true); setError(null); setPlayers([]);
+    setBusy(true); setError(null);
     try {
       const r = await fetch(`/api/player?q=${encodeURIComponent(sq)}`);
       const d = await r.json();
       if (d.error) throw new Error(d.error);
       if (!d.players.length) throw new Error("No players found — try a different spelling.");
-      setPlayers(d.players);
+      setPlayers(d.players); setListLabel(`Search: "${sq}"`);
     } catch (e) { setError(e.message); } finally { setBusy(false); }
   };
 
   const pickPlayer = async (p) => {
-    setBusy(true); setError(null); setPlayers([]); setQuery("");
+    setBusy(true); setError(null);
     try {
       const r = await fetch(`/api/logs?playerId=${encodeURIComponent(p.id)}&n=20`);
       const d = await r.json();
@@ -93,55 +108,46 @@ export default function PropDesk() {
   };
 
   const loadRoster = async (teamId, teamCode) => {
-    setBusy(true); setError(null); setPlayers([]); setScanResults(null);
+    setBusy(true); setError(null); setScanResults(null);
     try {
       const r = await fetch(`/api/roster?teamId=${teamId}`);
       const d = await r.json();
       if (d.error) throw new Error(d.error);
-      setPlayers(d.players.map(p => ({ ...p, team: teamCode })));
+      setPlayers(d.players.map(p => ({ ...p, team: teamCode }))); setListLabel(`${teamCode} roster`);
     } catch (e) { setError(e.message); } finally { setBusy(false); }
   };
 
-  // Scan a team's roster: fetch each player's logs, rank strongest bets
   const scanTeam = async (teamId, teamCode, label) => {
-    setScanning(true); setError(null); setScanResults(null); setDraft(null);
-    setPlayers([]); setScanLabel(label);
+    setScanning(true); setError(null); setScanResults(null);
+    setScanLabel(label);
     try {
       const rr = await fetch(`/api/roster?teamId=${teamId}`);
       const rd = await rr.json();
       if (rd.error) throw new Error(rd.error);
-      const roster = (rd.players || []).slice(0, 12); // cap for speed
-
+      const roster = (rd.players || []).slice(0, 12);
       const all = [];
-      // fetch logs in small batches
       for (const pl of roster) {
         try {
           const lr = await fetch(`/api/logs?playerId=${encodeURIComponent(pl.id)}&n=20`);
           const ld = await lr.json();
           if (ld.error || !ld.logs?.length) continue;
           const sugg = autoSuggest(ld.logs, window_, defaultOdds);
-          // keep only strong, confident picks
           for (const s of sugg) {
-            if (s.edge >= 0.04 && s.n >= 5) {
-              all.push({ player: pl, logs: ld.logs, team: teamCode, ...s });
-            }
+            if (s.edge >= 0.04 && s.n >= 5) all.push({ player: pl, logs: ld.logs, team: teamCode, ...s });
           }
-        } catch { /* skip player on error */ }
+        } catch {}
       }
       all.sort((a, b) => b.p - a.p);
       setScanResults(all.slice(0, 12));
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setScanning(false);
-    }
+      setTimeout(() => document.getElementById("scan-board")?.scrollIntoView({ behavior: "smooth", block: "start" }), 100);
+    } catch (e) { setError(e.message); } finally { setScanning(false); }
   };
 
   const addLegFromScan = (item) => {
     if (slate.length >= 10) return;
     setSlate(prev => [...prev, {
       player: item.player, logs: item.logs, stat: item.key, line: item.line,
-      side: item.side, odds: defaultOdds, window: window_, team: item.team, id: Date.now(),
+      side: item.side, odds: defaultOdds, window: window_, team: item.team, id: Date.now() + Math.random(),
     }]);
     setSlipOpen(true);
   };
@@ -150,7 +156,7 @@ export default function PropDesk() {
     if (slate.length >= 10) return;
     setSlate(prev => [...prev, {
       player: draft.player, logs: draft.logs, stat, line, side,
-      odds: odds || draft.odds, window: window_, team: draft.player.team, id: Date.now(),
+      odds: odds || draft.odds, window: window_, team: draft.player.team, id: Date.now() + Math.random(),
     }]);
     setSlipOpen(true);
   };
@@ -172,33 +178,69 @@ export default function PropDesk() {
     return evalLine(draft.logs, window_, bookStat, Number(bookLine), draft.odds);
   }, [draft, bookStat, bookLine, window_]);
 
+  // ── tracker actions ──
+  const saveBet = () => {
+    if (!legs.length) return;
+    const dec = legs.reduce((a, l) => a * l.odds, 1);
+    const ticket = {
+      id: Date.now(),
+      date: new Date().toISOString().slice(0, 10),
+      stake,
+      dec,
+      payout: stake * dec,
+      legs: legs.map(l => ({ name: l.player.name, stat: STAT_TYPES[l.stat].short, side: l.side, line: l.line, p: l.p })),
+      status: "pending",
+    };
+    saveTracked([ticket, ...tracked]);
+    setSlate([]);
+    setTab("tracker");
+  };
+  const markBet = (id, status) => saveTracked(tracked.map(t => t.id === id ? { ...t, status } : t));
+  const delBet = (id) => saveTracked(tracked.filter(t => t.id !== id));
+
+  const record = useMemo(() => {
+    const won = tracked.filter(t => t.status === "won");
+    const lost = tracked.filter(t => t.status === "lost");
+    const profit = won.reduce((a, t) => a + (t.payout - t.stake), 0) - lost.reduce((a, t) => a + t.stake, 0);
+    return { won: won.length, lost: lost.length, pending: tracked.filter(t => t.status === "pending").length, profit };
+  }, [tracked]);
+
   return (
     <div style={{ minHeight: "100vh", background: "var(--bg)", color: "var(--tx)", fontFamily: "Inter,sans-serif", paddingBottom: 120 }}>
 
-      <header style={{ borderBottom: "1px solid var(--line)", padding: "14px 16px 12px", position: "sticky", top: 0, background: "var(--bg)", zIndex: 50 }}>
-        <div style={{ fontSize: 10, letterSpacing: "0.3em", color: "var(--amber)", fontFamily: "'IBM Plex Mono',monospace", textTransform: "uppercase" }}>Risk Desk · 747 Parlay Builder</div>
+      <header style={{ borderBottom: "1px solid var(--line)", padding: "12px 16px", position: "sticky", top: 0, background: "var(--bg)", zIndex: 50 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <h1 style={{ fontFamily: "Oswald,sans-serif", fontSize: 26, margin: "2px 0 0" }}>PROP DESK</h1>
-          <button onClick={() => setShowHelp(!showHelp)} style={{ ...btnGhost, fontSize: 11, padding: "6px 10px" }}>
-            {showHelp ? "✕ Close" : "❓ Guide"}
+          <div>
+            <div style={{ fontSize: 9, letterSpacing: "0.3em", color: "var(--amber)", fontFamily: "'IBM Plex Mono',monospace", textTransform: "uppercase" }}>747 Parlay Builder</div>
+            <h1 style={{ fontFamily: "Oswald,sans-serif", fontSize: 24, margin: "1px 0 0" }}>PROP DESK</h1>
+          </div>
+          <button onClick={() => setShowHelp(!showHelp)} style={{ ...btnGhost, fontSize: 11, padding: "6px 10px" }}>{showHelp ? "✕" : "❓ Guide"}</button>
+        </div>
+        {/* TABS */}
+        <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+          <button onClick={() => setTab("build")} style={tab === "build" ? tabOn : tabOff}>Build Bets</button>
+          <button onClick={() => setTab("tracker")} style={tab === "tracker" ? tabOn : tabOff}>
+            My Bets {tracked.length > 0 && `(${record.won}-${record.lost})`}
           </button>
         </div>
-        <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
-          <label style={lbl}>Bankroll
-            <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-              <select value={sym} onChange={e => setSym(e.target.value)} style={{ ...inp, width: 58 }}>
-                <option value="₱">₱</option><option value="$">$</option>
-              </select>
-              <input type="number" value={bankroll} onChange={e => setBankroll(Number(e.target.value) || 0)} style={{ ...inp, width: 90 }} />
-            </div>
-          </label>
-          <label style={lbl}>Odds/leg
-            <input type="number" step="0.01" value={defaultOdds} onChange={e => setDefaultOdds(Number(e.target.value) || 1.91)} style={{ ...inp, width: 70 }} />
-          </label>
-          <label style={lbl}>Games
-            <input type="number" min="5" max="20" value={window_} onChange={e => setWindow(Math.min(20, Math.max(5, Number(e.target.value) || 10)))} style={{ ...inp, width: 56 }} />
-          </label>
-        </div>
+        {tab === "build" && (
+          <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
+            <label style={lbl}>Bankroll
+              <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                <select value={sym} onChange={e => setSym(e.target.value)} style={{ ...inp, width: 50 }}>
+                  <option value="₱">₱</option><option value="$">$</option>
+                </select>
+                <input type="number" value={bankroll} onChange={e => setBankroll(Number(e.target.value) || 0)} style={{ ...inp, width: 84 }} />
+              </div>
+            </label>
+            <label style={lbl}>Odds/leg
+              <input type="number" step="0.01" value={defaultOdds} onChange={e => setDefaultOdds(Number(e.target.value) || 1.91)} style={{ ...inp, width: 66 }} />
+            </label>
+            <label style={lbl}>Games
+              <input type="number" min="5" max="20" value={window_} onChange={e => setWindow(Math.min(20, Math.max(5, Number(e.target.value) || 10)))} style={{ ...inp, width: 52 }} />
+            </label>
+          </div>
+        )}
       </header>
 
       <div style={{ maxWidth: 640, margin: "0 auto", padding: "14px 14px 0" }}>
@@ -207,161 +249,105 @@ export default function PropDesk() {
           <section style={panel}>
             <div style={sectionTitle}>How to win with this</div>
             <div style={{ fontSize: 13, lineHeight: 1.7 }}>
-              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Fastest way:</b> tap "🔍 Find best bets" on a game below. The app scans every player and ranks the strongest plays automatically.</p>
-              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>To check a 747 line:</b> tap a player, type 747's exact number in the gold box. It shows how often he actually hit it.</p>
-              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Match the line!</b> The app's number must equal 747's, or the % is meaningless.</p>
-              <p style={{ color: "var(--red)" }}>Parlay = ALL legs must win. A screening tool, not a guarantee. Bet only what you can lose.</p>
+              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Fastest:</b> tap "🔍 Best bets" on a game — the app scans every player and ranks the strongest plays.</p>
+              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Check a 747 line:</b> tap a player, type 747's exact number in the gold box.</p>
+              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Track results:</b> save a bet, then mark it Won/Lost in "My Bets" to see if these picks actually make money over time.</p>
+              <p style={{ color: "var(--red)" }}>Parlay = ALL legs must win. Screening tool, not a guarantee. Bet only what you can lose.</p>
             </div>
           </section>
         )}
 
-        {/* GAMES with scan buttons */}
-        {games.length > 0 && (
-          <section style={panel}>
-            <div style={sectionTitle}>Games — find bets or browse players</div>
-            {games.map(g => (
-              <div key={g.id} style={{ display: "flex", flexDirection: "column", gap: 8, paddingBottom: 10, borderBottom: "1px solid var(--line)" }}>
-                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <span style={{ fontFamily: "Oswald,sans-serif", fontSize: 15 }}>{g.away} @ {g.home}</span>
-                  <span style={{ color: "var(--mut)", fontSize: 11, marginLeft: "auto" }}>{g.status}</span>
-                </div>
-                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                  <button style={{ ...btnAmber, flex: 1, minWidth: 130 }} onClick={() => scanTeam(g.awayId, g.away, g.away)}>🔍 Best bets: {g.away}</button>
-                  <button style={{ ...btnAmber, flex: 1, minWidth: 130 }} onClick={() => scanTeam(g.homeId, g.home, g.home)}>🔍 Best bets: {g.home}</button>
-                </div>
-                <div style={{ display: "flex", gap: 6 }}>
-                  <button style={{ ...btnGhost, flex: 1, fontSize: 11 }} onClick={() => loadRoster(g.awayId, g.away)}>Browse {g.away} players</button>
-                  <button style={{ ...btnGhost, flex: 1, fontSize: 11 }} onClick={() => loadRoster(g.homeId, g.home)}>Browse {g.home} players</button>
-                </div>
+        {/* ───────── TRACKER TAB ───────── */}
+        {tab === "tracker" && (
+          <>
+            <section style={panel}>
+              <div style={sectionTitle}>My Record</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
+                <div style={miniStat}><div style={miniLbl}>Won</div><div style={{ ...miniVal, color: "var(--green)" }}>{record.won}</div></div>
+                <div style={miniStat}><div style={miniLbl}>Lost</div><div style={{ ...miniVal, color: "var(--red)" }}>{record.lost}</div></div>
+                <div style={miniStat}><div style={miniLbl}>Net profit</div><div style={{ ...miniVal, color: record.profit >= 0 ? "var(--green)" : "var(--red)" }}>{record.profit >= 0 ? "+" : "−"}{fmtCash(record.profit, sym)}</div></div>
               </div>
-            ))}
-          </section>
-        )}
-
-        {/* SCAN RESULTS — the recommendations board */}
-        {(scanning || scanResults) && (
-          <section style={{ ...panel, border: "1px solid rgba(52,211,153,.3)" }}>
-            <div style={{ ...sectionTitle, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span style={{ color: "var(--green)" }}>⭐ Strong bets — {scanLabel}</span>
-              {scanResults && <button onClick={() => setScanResults(null)} style={{ ...bigClose }}>✕</button>}
-            </div>
-            {scanning && <div style={{ color: "var(--amber)", fontSize: 13, padding: "8px 0" }}>Scanning roster… checking each player's recent games. ~10-20s.</div>}
-            {scanResults && scanResults.length === 0 && (
-              <div style={{ color: "var(--mut)", fontSize: 13 }}>No strong bets found for this team right now (nothing cleared the edge threshold). Try the other team or browse players manually.</div>
-            )}
-            {scanResults && scanResults.map((s, i) => {
-              const v = verdict(s.edge);
-              const sideLabel = s.side === "over" ? "Over" : "Under";
-              return (
-                <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, paddingBottom: 8, borderBottom: "1px solid var(--line)" }}>
-                  <div>
-                    <div style={{ fontSize: 14, fontWeight: 600 }}>
-                      {s.player.name} — <span style={{ color: s.side === "over" ? "var(--green)" : "var(--amber)" }}>{sideLabel} {s.line} {s.short}</span>
-                    </div>
-                    <div style={{ fontSize: 11, color: "var(--mut)", fontFamily: "'IBM Plex Mono',monospace" }}>
-                      {sideLabel === "Over" ? "went over" : "stayed under"} {s.hits}/{s.n} · avg {s.avg.toFixed(1)}
-                    </div>
-                  </div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <div style={{ textAlign: "right" }}>
-                      <div style={{ fontSize: 16, fontWeight: 700, color: v.color, fontFamily: "'IBM Plex Mono',monospace" }}>{fmtPct(s.p)}</div>
-                      <div style={{ fontSize: 9, color: v.color }}>{v.text}</div>
-                    </div>
-                    <button onClick={() => addLegFromScan(s)} disabled={slate.length >= 10} style={{ ...btnAmber, padding: "8px 12px", fontSize: 16 }}>+</button>
-                  </div>
-                </div>
-              );
-            })}
-            {scanResults && scanResults.length > 0 && (
-              <div style={{ fontSize: 11, color: "var(--mut)" }}>These use the app's own lines. Always confirm against 747's actual line before betting — tap a player to check exact numbers.</div>
-            )}
-          </section>
-        )}
-
-        {/* SEARCH */}
-        <section style={panel}>
-          <div style={sectionTitle}>Or search any player</div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <input value={query} placeholder="e.g. Wembanyama"
-              onChange={e => setQuery(e.target.value)}
-              onKeyDown={e => e.key === "Enter" && search()}
-              style={{ ...inp, flex: 1 }} />
-            <button onClick={() => search()} disabled={busy} style={btnPrimary}>{busy ? "…" : "Search"}</button>
-          </div>
-          {players.length > 0 && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <span style={{ fontSize: 11, color: "var(--mut)" }}>{players.length} players — tap one</span>
-                <button onClick={() => setPlayers([])} style={{ ...bigClose }}>✕ Close list</button>
-              </div>
-              {players.map(p => (
-                <button key={p.id} onClick={() => pickPlayer(p)} style={{ ...btnGhost, textAlign: "left", padding: "10px 12px" }}>
-                  {p.name} <span style={{ color: "var(--mut)", fontSize: 11 }}>{p.team} {p.position}</span>
-                </button>
-              ))}
-            </div>
-          )}
-          {error && <div style={errStyle}>{error}</div>}
-        </section>
-
-        {/* PLAYER CARD */}
-        {draft && (
-          <section id="player-card" style={{ ...panel, border: "1px solid rgba(251,191,36,.4)" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-              <div>
-                <div style={{ fontSize: 20, fontFamily: "Oswald,sans-serif" }}>{draft.player.name}</div>
-                <div style={{ color: "var(--mut)", fontSize: 12 }}>{draft.player.team} · {draft.player.position} · last {window_} games</div>
-              </div>
-              <button onClick={() => setDraft(null)} style={bigClose}>✕ Close</button>
-            </div>
-
-            <div style={{ background: "rgba(251,191,36,.07)", border: "1px solid rgba(251,191,36,.4)", borderRadius: 8, padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: "var(--amber)", fontFamily: "Oswald,sans-serif", letterSpacing: "0.05em" }}>★ CHECK 747'S LINE</div>
-              <div style={{ fontSize: 11, color: "var(--mut)" }}>Type the exact stat & line 747 shows.</div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <select value={bookStat} onChange={e => setBookStat(e.target.value)} style={{ ...inp, flex: 1 }}>
-                  {Object.entries(STAT_TYPES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
-                </select>
-                <input type="number" step="0.5" value={bookLine} placeholder="e.g. 30"
-                  onChange={e => setBookLine(e.target.value)} style={{ ...inp, flex: 1 }} />
-              </div>
-
-              {bookEval && (
-                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                    <div style={{ ...sideBox, borderColor: bookEval.over > bookEval.under ? "var(--green)" : "var(--line)" }}>
-                      <div style={miniLbl}>OVER {bookEval.line}</div>
-                      <div style={{ ...miniVal, fontSize: 22, color: bookEval.over >= 0.6 ? "var(--green)" : bookEval.over <= 0.4 ? "var(--red)" : "var(--amber)" }}>{fmtPct(bookEval.over)}</div>
-                      <div style={{ fontSize: 10, color: "var(--mut)" }}>hit {bookEval.overHits}/{bookEval.n}</div>
-                      <button onClick={() => addLeg(bookStat, bookEval.line, "over", draft.odds)} disabled={slate.length >= 10} style={{ ...btnGhost, fontSize: 11, padding: "6px 8px", marginTop: 6, width: "100%" }}>+ Over</button>
-                    </div>
-                    <div style={{ ...sideBox, borderColor: bookEval.under > bookEval.over ? "var(--green)" : "var(--line)" }}>
-                      <div style={miniLbl}>UNDER {bookEval.line}</div>
-                      <div style={{ ...miniVal, fontSize: 22, color: bookEval.under >= 0.6 ? "var(--green)" : bookEval.under <= 0.4 ? "var(--red)" : "var(--amber)" }}>{fmtPct(bookEval.under)}</div>
-                      <div style={{ fontSize: 10, color: "var(--mut)" }}>hit {bookEval.underHits}/{bookEval.n}</div>
-                      <button onClick={() => addLeg(bookStat, bookEval.line, "under", draft.odds)} disabled={slate.length >= 10} style={{ ...btnGhost, fontSize: 11, padding: "6px 8px", marginTop: 6, width: "100%" }}>+ Under</button>
-                    </div>
-                  </div>
-                  <div style={{ fontSize: 12, textAlign: "center", padding: 6, background: "rgba(0,0,0,.25)", borderRadius: 6 }}>
-                    Lean: <b style={{ color: verdict(bookEval.edge).color }}>{bookEval.best.toUpperCase()} {bookEval.line}</b> — {verdict(bookEval.edge).text}
-                  </div>
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                    {bookEval.vals.map((v, i) => <Chip key={i} val={v} hit={bookEval.best === "over" ? v > bookEval.line : v < bookEval.line} />)}
-                  </div>
+              {tracked.length > 0 && record.won + record.lost > 0 && (
+                <div style={{ fontSize: 12, color: "var(--mut)" }}>
+                  Win rate: <b style={{ color: "var(--tx)" }}>{fmtPct(record.won / (record.won + record.lost))}</b> over {record.won + record.lost} settled bets.
+                  {record.pending > 0 && ` ${record.pending} still pending.`}
                 </div>
               )}
-            </div>
+            </section>
 
-            <div>
-              <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--mut)", marginBottom: 4, fontFamily: "'IBM Plex Mono',monospace" }}>His strongest stats</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                {suggestions.map(s => {
+            <section style={panel}>
+              <div style={sectionTitle}>Bet History</div>
+              {tracked.length === 0 && <div style={{ color: "var(--mut)", fontSize: 13 }}>No saved bets yet. Build a parlay, then tap "Save to tracker" in the slip.</div>}
+              {tracked.map(t => (
+                <div key={t.id} style={{ ...card, borderColor: t.status === "won" ? "rgba(52,211,153,.4)" : t.status === "lost" ? "rgba(248,113,113,.4)" : "var(--line)" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ fontSize: 12, color: "var(--mut)" }}>{t.date} · {t.legs.length} leg{t.legs.length > 1 ? "s" : ""} · {t.dec.toFixed(2)}x</span>
+                    <span style={{ fontSize: 12, fontWeight: 700, color: t.status === "won" ? "var(--green)" : t.status === "lost" ? "var(--red)" : "var(--amber)" }}>
+                      {t.status === "won" ? "WON ✓" : t.status === "lost" ? "LOST ✗" : "PENDING"}
+                    </span>
+                  </div>
+                  {t.legs.map((l, i) => (
+                    <div key={i} style={{ fontSize: 12 }}>• {l.name} {l.side === "over" ? "O" : "U"}{l.line} {l.stat} <span style={{ color: "var(--mut)" }}>({fmtPct(l.p)})</span></div>
+                  ))}
+                  <div style={{ fontSize: 12, color: "var(--mut)" }}>Bet {fmtCash(t.stake, sym)} → {t.status === "won" ? `won ${fmtCash(t.payout - t.stake, sym)}` : t.status === "lost" ? `lost ${fmtCash(t.stake, sym)}` : `to win ${fmtCash(t.payout - t.stake, sym)}`}</div>
+                  {t.status === "pending" ? (
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button onClick={() => markBet(t.id, "won")} style={{ ...btnAmber, flex: 1, borderColor: "var(--green)", color: "var(--green)", background: "rgba(52,211,153,.1)" }}>✓ Won</button>
+                      <button onClick={() => markBet(t.id, "lost")} style={{ ...btnAmber, flex: 1, borderColor: "var(--red)", color: "var(--red)", background: "rgba(248,113,113,.1)" }}>✗ Lost</button>
+                      <button onClick={() => delBet(t.id)} style={{ ...bigClose }}>🗑</button>
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button onClick={() => markBet(t.id, "pending")} style={{ ...btnGhost, fontSize: 11 }}>↺ Undo</button>
+                      <button onClick={() => delBet(t.id)} style={{ ...bigClose }}>🗑 Delete</button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </section>
+          </>
+        )}
+
+        {/* ───────── BUILD TAB ───────── */}
+        {tab === "build" && (
+          <>
+            {games.length > 0 && (
+              <section style={panel}>
+                <div style={sectionTitle}>Games — find bets or browse players</div>
+                {games.map(g => (
+                  <div key={g.id} style={{ display: "flex", flexDirection: "column", gap: 8, paddingBottom: 10, borderBottom: "1px solid var(--line)" }}>
+                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      <span style={{ fontFamily: "Oswald,sans-serif", fontSize: 15 }}>{g.away} @ {g.home}</span>
+                      <span style={{ color: "var(--mut)", fontSize: 11, marginLeft: "auto" }}>{g.status}</span>
+                    </div>
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      <button style={{ ...btnAmber, flex: 1, minWidth: 130 }} onClick={() => scanTeam(g.awayId, g.away, g.away)}>🔍 Best bets: {g.away}</button>
+                      <button style={{ ...btnAmber, flex: 1, minWidth: 130 }} onClick={() => scanTeam(g.homeId, g.home, g.home)}>🔍 Best bets: {g.home}</button>
+                    </div>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button style={{ ...btnGhost, flex: 1, fontSize: 11 }} onClick={() => loadRoster(g.awayId, g.away)}>Browse {g.away}</button>
+                      <button style={{ ...btnGhost, flex: 1, fontSize: 11 }} onClick={() => loadRoster(g.homeId, g.home)}>Browse {g.home}</button>
+                    </div>
+                  </div>
+                ))}
+              </section>
+            )}
+
+            {(scanning || scanResults) && (
+              <section id="scan-board" style={{ ...panel, border: "1px solid rgba(52,211,153,.3)" }}>
+                <div style={{ ...sectionTitle, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <span style={{ color: "var(--green)" }}>⭐ Strong bets — {scanLabel}</span>
+                  {scanResults && <button onClick={() => setScanResults(null)} style={bigClose}>✕</button>}
+                </div>
+                {scanning && <div style={{ color: "var(--amber)", fontSize: 13 }}>Scanning roster… ~10-20s.</div>}
+                {scanResults && scanResults.length === 0 && <div style={{ color: "var(--mut)", fontSize: 13 }}>No strong bets cleared the threshold. Try the other team.</div>}
+                {scanResults && scanResults.map((s, i) => {
                   const v = verdict(s.edge);
                   const sideLabel = s.side === "over" ? "Over" : "Under";
                   return (
-                    <div key={s.key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, background: "rgba(0,0,0,.25)", border: "1px solid var(--line)", borderRadius: 8, padding: "10px 12px" }}>
+                    <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, paddingBottom: 8, borderBottom: "1px solid var(--line)" }}>
                       <div>
-                        <div style={{ fontSize: 14, fontWeight: 600 }}>{s.label} — <span style={{ color: s.side === "over" ? "var(--green)" : "var(--amber)" }}>{sideLabel} {s.line}</span></div>
+                        <div style={{ fontSize: 14, fontWeight: 600 }}>{s.player.name} — <span style={{ color: s.side === "over" ? "var(--green)" : "var(--amber)" }}>{sideLabel} {s.line} {s.short}</span></div>
                         <div style={{ fontSize: 11, color: "var(--mut)", fontFamily: "'IBM Plex Mono',monospace" }}>{sideLabel === "Over" ? "went over" : "stayed under"} {s.hits}/{s.n} · avg {s.avg.toFixed(1)}</div>
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -369,41 +355,138 @@ export default function PropDesk() {
                           <div style={{ fontSize: 16, fontWeight: 700, color: v.color, fontFamily: "'IBM Plex Mono',monospace" }}>{fmtPct(s.p)}</div>
                           <div style={{ fontSize: 9, color: v.color }}>{v.text}</div>
                         </div>
-                        <button onClick={() => addLeg(s.key, s.line, s.side, draft.odds)} disabled={slate.length >= 10} style={{ ...btnAmber, padding: "8px 12px", fontSize: 16 }}>+</button>
+                        <button onClick={() => addLegFromScan(s)} disabled={slate.length >= 10} style={{ ...btnAmber, padding: "8px 12px", fontSize: 16 }}>+</button>
                       </div>
                     </div>
                   );
                 })}
-              </div>
-            </div>
-          </section>
-        )}
+                {scanResults && scanResults.length > 0 && <div style={{ fontSize: 11, color: "var(--mut)" }}>App's own lines — confirm against 747 before betting.</div>}
+              </section>
+            )}
 
-        {/* PARLAY */}
-        {parlays.length > 0 && (
-          <section style={panel}>
-            <div style={sectionTitle}>Recommended Parlays</div>
-            {parlays.map(pl => {
-              const { dec, adjP, ev, extraSameTeam } = priceParlay(pl.legs);
-              return (
-                <div key={pl.name} style={{ ...card, borderColor: ev >= 0 ? "rgba(52,211,153,.3)" : "var(--line)" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-                    <span style={{ fontFamily: "Oswald,sans-serif", fontSize: 16, color: "var(--amber)" }}>{pl.emoji} {pl.name} — {pl.legs.length} legs</span>
-                    <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 12, color: ev >= 0 ? "var(--green)" : "var(--red)" }}>{ev >= 0 ? "+EV ✓" : "−EV ✗"}</span>
+            <section style={panel}>
+              <div style={sectionTitle}>Search any player</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <input value={query} placeholder="e.g. Wembanyama" onChange={e => setQuery(e.target.value)} onKeyDown={e => e.key === "Enter" && search()} style={{ ...inp, flex: 1 }} />
+                <button onClick={() => search()} disabled={busy} style={btnPrimary}>{busy ? "…" : "Search"}</button>
+              </div>
+              {players.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ fontSize: 11, color: "var(--mut)" }}>{listLabel} — tap to analyze (list stays open)</span>
+                    <button onClick={() => setPlayers([])} style={bigClose}>✕ Hide</button>
                   </div>
-                  {pl.legs.map((l, i) => (
-                    <div key={i} style={{ fontSize: 12 }}>• {l.player.name} {STAT_TYPES[l.stat].label} {l.side === "over" ? "O" : "U"}{l.line} <span style={{ color: "var(--mut)" }}>({fmtPct(l.p)})</span></div>
-                  ))}
-                  <SegBar p={adjP} />
-                  <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
-                    {[["Chance ALL hit", fmtPct(adjP)], ["Payout", `${dec.toFixed(2)}x`], [`Bet ${fmtCash(stake, sym)} →`, fmtCash(stake * dec, sym)]].map(([k, v]) => (
-                      <div key={k} style={miniStat}><div style={miniLbl}>{k}</div><div style={miniVal}>{v}</div></div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 260, overflowY: "auto" }}>
+                    {players.map(p => (
+                      <button key={p.id} onClick={() => pickPlayer(p)}
+                        style={{ ...btnGhost, textAlign: "left", padding: "10px 12px",
+                          borderColor: draft?.player?.id === p.id ? "var(--amber)" : "var(--line)",
+                          background: draft?.player?.id === p.id ? "rgba(251,191,36,.08)" : "transparent" }}>
+                        {p.name} <span style={{ color: "var(--mut)", fontSize: 11 }}>{p.team} {p.position}</span>
+                      </button>
                     ))}
                   </div>
                 </div>
-              );
-            })}
-          </section>
+              )}
+              {error && <div style={errStyle}>{error}</div>}
+            </section>
+
+            {draft && (
+              <section id="player-card" style={{ ...panel, border: "1px solid rgba(251,191,36,.4)" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                  <div>
+                    <div style={{ fontSize: 20, fontFamily: "Oswald,sans-serif" }}>{draft.player.name}</div>
+                    <div style={{ color: "var(--mut)", fontSize: 12 }}>{draft.player.team} · {draft.player.position} · last {window_} games</div>
+                  </div>
+                  <button onClick={() => setDraft(null)} style={bigClose}>✕ Close</button>
+                </div>
+
+                <div style={{ background: "rgba(251,191,36,.07)", border: "1px solid rgba(251,191,36,.4)", borderRadius: 8, padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "var(--amber)", fontFamily: "Oswald,sans-serif", letterSpacing: "0.05em" }}>★ CHECK 747'S LINE</div>
+                  <div style={{ fontSize: 11, color: "var(--mut)" }}>Type the exact stat & line 747 shows.</div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <select value={bookStat} onChange={e => setBookStat(e.target.value)} style={{ ...inp, flex: 1 }}>
+                      {Object.entries(STAT_TYPES).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+                    </select>
+                    <input type="number" step="0.5" value={bookLine} placeholder="e.g. 30" onChange={e => setBookLine(e.target.value)} style={{ ...inp, flex: 1 }} />
+                  </div>
+                  {bookEval && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                        <div style={{ ...sideBox, borderColor: bookEval.over > bookEval.under ? "var(--green)" : "var(--line)" }}>
+                          <div style={miniLbl}>OVER {bookEval.line}</div>
+                          <div style={{ ...miniVal, fontSize: 22, color: bookEval.over >= 0.6 ? "var(--green)" : bookEval.over <= 0.4 ? "var(--red)" : "var(--amber)" }}>{fmtPct(bookEval.over)}</div>
+                          <div style={{ fontSize: 10, color: "var(--mut)" }}>hit {bookEval.overHits}/{bookEval.n}</div>
+                          <button onClick={() => addLeg(bookStat, bookEval.line, "over", draft.odds)} disabled={slate.length >= 10} style={{ ...btnGhost, fontSize: 11, padding: "6px 8px", marginTop: 6, width: "100%" }}>+ Over</button>
+                        </div>
+                        <div style={{ ...sideBox, borderColor: bookEval.under > bookEval.over ? "var(--green)" : "var(--line)" }}>
+                          <div style={miniLbl}>UNDER {bookEval.line}</div>
+                          <div style={{ ...miniVal, fontSize: 22, color: bookEval.under >= 0.6 ? "var(--green)" : bookEval.under <= 0.4 ? "var(--red)" : "var(--amber)" }}>{fmtPct(bookEval.under)}</div>
+                          <div style={{ fontSize: 10, color: "var(--mut)" }}>hit {bookEval.underHits}/{bookEval.n}</div>
+                          <button onClick={() => addLeg(bookStat, bookEval.line, "under", draft.odds)} disabled={slate.length >= 10} style={{ ...btnGhost, fontSize: 11, padding: "6px 8px", marginTop: 6, width: "100%" }}>+ Under</button>
+                        </div>
+                      </div>
+                      <div style={{ fontSize: 12, textAlign: "center", padding: 6, background: "rgba(0,0,0,.25)", borderRadius: 6 }}>
+                        Lean: <b style={{ color: verdict(bookEval.edge).color }}>{bookEval.best.toUpperCase()} {bookEval.line}</b> — {verdict(bookEval.edge).text}
+                      </div>
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                        {bookEval.vals.map((v, i) => <Chip key={i} val={v} hit={bookEval.best === "over" ? v > bookEval.line : v < bookEval.line} />)}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--mut)", marginBottom: 4, fontFamily: "'IBM Plex Mono',monospace" }}>His strongest stats</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {suggestions.map(s => {
+                      const v = verdict(s.edge);
+                      const sideLabel = s.side === "over" ? "Over" : "Under";
+                      return (
+                        <div key={s.key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, background: "rgba(0,0,0,.25)", border: "1px solid var(--line)", borderRadius: 8, padding: "10px 12px" }}>
+                          <div>
+                            <div style={{ fontSize: 14, fontWeight: 600 }}>{s.label} — <span style={{ color: s.side === "over" ? "var(--green)" : "var(--amber)" }}>{sideLabel} {s.line}</span></div>
+                            <div style={{ fontSize: 11, color: "var(--mut)", fontFamily: "'IBM Plex Mono',monospace" }}>{sideLabel === "Over" ? "went over" : "stayed under"} {s.hits}/{s.n} · avg {s.avg.toFixed(1)}</div>
+                          </div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <div style={{ textAlign: "right" }}>
+                              <div style={{ fontSize: 16, fontWeight: 700, color: v.color, fontFamily: "'IBM Plex Mono',monospace" }}>{fmtPct(s.p)}</div>
+                              <div style={{ fontSize: 9, color: v.color }}>{v.text}</div>
+                            </div>
+                            <button onClick={() => addLeg(s.key, s.line, s.side, draft.odds)} disabled={slate.length >= 10} style={{ ...btnAmber, padding: "8px 12px", fontSize: 16 }}>+</button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </section>
+            )}
+
+            {parlays.length > 0 && (
+              <section style={panel}>
+                <div style={sectionTitle}>Recommended Parlays</div>
+                {parlays.map(pl => {
+                  const { dec, adjP, ev } = priceParlay(pl.legs);
+                  return (
+                    <div key={pl.name} style={{ ...card, borderColor: ev >= 0 ? "rgba(52,211,153,.3)" : "var(--line)" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+                        <span style={{ fontFamily: "Oswald,sans-serif", fontSize: 16, color: "var(--amber)" }}>{pl.emoji} {pl.name} — {pl.legs.length} legs</span>
+                        <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 12, color: ev >= 0 ? "var(--green)" : "var(--red)" }}>{ev >= 0 ? "+EV ✓" : "−EV ✗"}</span>
+                      </div>
+                      {pl.legs.map((l, i) => <div key={i} style={{ fontSize: 12 }}>• {l.player.name} {STAT_TYPES[l.stat].label} {l.side === "over" ? "O" : "U"}{l.line} <span style={{ color: "var(--mut)" }}>({fmtPct(l.p)})</span></div>)}
+                      <SegBar p={adjP} />
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
+                        {[["Chance ALL hit", fmtPct(adjP)], ["Payout", `${dec.toFixed(2)}x`], [`Bet ${fmtCash(stake, sym)} →`, fmtCash(stake * dec, sym)]].map(([k, v]) => (
+                          <div key={k} style={miniStat}><div style={miniLbl}>{k}</div><div style={miniVal}>{v}</div></div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </section>
+            )}
+          </>
         )}
 
         <footer style={{ fontSize: 11, color: "var(--mut)", borderTop: "1px solid var(--line)", paddingTop: 12, marginTop: 8 }}>
@@ -412,7 +495,7 @@ export default function PropDesk() {
       </div>
 
       {/* STICKY SLIP */}
-      {legs.length > 0 && (
+      {legs.length > 0 && tab === "build" && (
         <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, background: "#0d1117", borderTop: "2px solid var(--amber)", zIndex: 100 }}>
           <button onClick={() => setSlipOpen(!slipOpen)} style={{ width: "100%", background: "transparent", border: "none", color: "var(--amber)", padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", fontFamily: "Oswald,sans-serif", fontSize: 15 }}>
             <span>🎰 MY PARLAY — {legs.length} legs</span>
@@ -423,7 +506,7 @@ export default function PropDesk() {
             <div style={{ padding: "0 16px 16px", display: "flex", flexDirection: "column", gap: 10, maxHeight: "60vh", overflowY: "auto" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <span style={{ fontSize: 11, color: "var(--red)", fontWeight: 600 }}>⚠ ALL {legs.length} must win</span>
-                <button onClick={() => setSlate([])} style={{ ...bigClose }}>Clear all</button>
+                <button onClick={() => setSlate([])} style={bigClose}>Clear all</button>
               </div>
               {legs.map(l => (
                 <div key={l.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 12 }}>
@@ -446,6 +529,7 @@ export default function PropDesk() {
                     </div>
                   </div>
                   <div style={{ fontSize: 11, color: "var(--mut)" }}>Chance all hit: <b style={{ color: slip.adjP > 0.3 ? "var(--green)" : "var(--amber)" }}>{fmtPct(slip.adjP)}</b></div>
+                  <button onClick={saveBet} style={{ ...btnPrimary, width: "100%" }}>💾 Save to tracker</button>
                 </>
               )}
             </div>
@@ -462,6 +546,8 @@ const btnPrimary = { background: "var(--amber)", color: "#0a0e14", border: "none
 const btnAmber = { background: "rgba(251,191,36,.15)", color: "var(--amber)", border: "1px solid var(--amber)", borderRadius: 6, padding: "9px 12px", fontWeight: 600, fontSize: 12, cursor: "pointer" };
 const btnGhost = { background: "transparent", border: "1px solid var(--line)", borderRadius: 6, color: "var(--amber)", padding: "9px 12px", fontSize: 12, cursor: "pointer" };
 const bigClose = { background: "rgba(248,113,113,.1)", border: "1px solid rgba(248,113,113,.3)", borderRadius: 6, color: "var(--red)", padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" };
+const tabOn = { flex: 1, background: "var(--amber)", color: "#0a0e14", border: "none", borderRadius: 6, padding: "8px", fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "Oswald,sans-serif" };
+const tabOff = { flex: 1, background: "transparent", color: "var(--mut)", border: "1px solid var(--line)", borderRadius: 6, padding: "8px", fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "Oswald,sans-serif" };
 const panel = { background: "#11161f", border: "1px solid var(--line)", borderRadius: 10, padding: 14, marginBottom: 14, display: "flex", flexDirection: "column", gap: 12 };
 const card = { background: "rgba(0,0,0,.2)", border: "1px solid var(--line)", borderRadius: 8, padding: 12, display: "flex", flexDirection: "column", gap: 8 };
 const sectionTitle = { fontSize: 10, textTransform: "uppercase", letterSpacing: "0.15em", color: "var(--amber)", fontFamily: "'IBM Plex Mono',monospace" };
