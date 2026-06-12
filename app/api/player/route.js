@@ -1,43 +1,45 @@
-// GET /api/player?q=wemban — search via ESPN athlete index (cloud-friendly, no key)
-import { ESPN_WEB, UA } from "../../../lib/espn";
-export const revalidate = 86400;
+// GET /api/player?q=brunson — search via ESPN search/v2 (real search, NBA-filtered)
+import { UA } from "../../../lib/espn";
+export const revalidate = 3600;
 
-// ESPN doesn't have a clean search endpoint, so we pull the active athlete list
-// (cached 24h) and filter in-memory. ~550 players, small payload.
-let CACHE = null;
-let CACHE_TS = 0;
+// ESPN's working search endpoint. NBA league code in uid is "l:46".
+// uid looks like "s:40~l:46~a:3934672" → athlete id 3934672.
+export async function GET(request) {
+  const q = (new URL(request.url).searchParams.get("q") || "").trim();
+  if (q.length < 2) return Response.json({ error: "Type at least 2 characters" }, { status: 400 });
 
-async function getAthletes() {
-  if (CACHE && Date.now() - CACHE_TS < 86400000) return CACHE;
-  // page through active athletes
-  const out = [];
-  for (let page = 1; page <= 8; page++) {
-    const r = await fetch(`${ESPN_WEB}/athletes?limit=100&page=${page}&active=true`, { headers: UA });
-    if (!r.ok) break;
+  try {
+    const r = await fetch(
+      `https://site.web.api.espn.com/apis/search/v2?query=${encodeURIComponent(q)}&limit=30`,
+      { headers: UA }
+    );
+    if (!r.ok) return Response.json({ error: `ESPN search ${r.status}` }, { status: 502 });
     const d = await r.json();
-    const items = d.items || d.athletes || [];
-    if (!items.length) break;
-    for (const a of items) {
-      out.push({
-        id: a.id,
-        name: a.displayName || a.fullName || `${a.firstName} ${a.lastName}`,
-        team: a.team?.abbreviation || "",
-        position: a.position?.abbreviation || "",
+
+    const contents = (d.results || []).flatMap((x) => x.contents || []);
+    const players = [];
+    for (const it of contents) {
+      if (it.type !== "player") continue;
+      const uid = it.uid || "";
+      // NBA only: league code l:46
+      if (!/~l:46~/.test(uid)) continue;
+      const idMatch = uid.match(/a:(\d+)/);
+      if (!idMatch) continue;
+      players.push({
+        id: idMatch[1],
+        name: it.displayName || it.title || "",
+        // search results don't include team/pos reliably; fill from subtitle if present
+        team: (it.subtitle || "").split(/[,•·]/)[0]?.trim() || "",
+        position: "",
       });
     }
-    if (items.length < 100) break;
-  }
-  CACHE = out; CACHE_TS = Date.now();
-  return out;
-}
 
-export async function GET(request) {
-  const q = (new URL(request.url).searchParams.get("q") || "").toLowerCase().trim();
-  if (q.length < 2) return Response.json({ error: "Type at least 2 characters" }, { status: 400 });
-  try {
-    const all = await getAthletes();
-    const players = all.filter((p) => p.name.toLowerCase().includes(q)).slice(0, 12);
-    return Response.json({ players });
+    // de-dupe by id, cap at 12
+    const seen = new Set();
+    const unique = players.filter((p) => (seen.has(p.id) ? false : (seen.add(p.id), true))).slice(0, 12);
+
+    if (!unique.length) return Response.json({ players: [], error: "No NBA player found — try last name only." });
+    return Response.json({ players: unique });
   } catch (e) {
     return Response.json({ error: `ESPN search failed: ${e.message}` }, { status: 502 });
   }
