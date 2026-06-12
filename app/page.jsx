@@ -2,14 +2,13 @@
 import { useState, useMemo, useEffect } from "react";
 import {
   STAT_TYPES, impliedProb, weightedShrunkProb, kellyStake,
-  priceParlay, recommendParlays, autoSuggest, evalLine,
+  priceParlay, recommendParlays, autoSuggest, evalLine, parseSlip,
 } from "../lib/engine";
 
 const fmtPct = (x, dp = 1) => `${(x * 100).toFixed(dp)}%`;
 const fmtCash = (x, sym) => `${sym}${Math.abs(x).toLocaleString("en-PH", { maximumFractionDigits: 0 })}`;
 const TRACK_KEY = "propdesk_bets_v1";
 
-// stat category grouping for the scan board
 const STAT_GROUPS = [
   { label: "Points", keys: ["pts"] },
   { label: "Rebounds", keys: ["reb"] },
@@ -51,7 +50,6 @@ function verdict(edge) {
   return { text: "AVOID", color: "var(--red)" };
 }
 
-// Inline 747 line-check for a single scan result (no need to leave the board)
 function InlineCheck({ item, window_, defaultOdds, onAdd, sym }) {
   const [stat, setStat] = useState(item.key);
   const [line, setLine] = useState(String(item.line));
@@ -122,7 +120,12 @@ export default function PropDesk() {
   const [scanResults, setScanResults] = useState(null);
   const [scanLabel, setScanLabel] = useState("");
   const [scanGroup, setScanGroup] = useState("all");
-  const [openCheck, setOpenCheck] = useState(null); // index of scan row with inline check open
+  const [openCheck, setOpenCheck] = useState(null);
+
+  // paste-slip state
+  const [pasteText, setPasteText] = useState("");
+  const [pasteBusy, setPasteBusy] = useState(false);
+  const [pasteResults, setPasteResults] = useState(null);
 
   const [tracked, setTracked] = useState([]);
   useEffect(() => {
@@ -198,6 +201,37 @@ export default function PropDesk() {
     } catch (e) { setError(e.message); } finally { setScanning(false); }
   };
 
+  // ── paste slip: parse, resolve each player, evaluate each leg ──
+  const analyzeSlip = async () => {
+    const parsed = parseSlip(pasteText);
+    if (!parsed.length) { setError("Couldn't read any legs. Check the format."); return; }
+    setPasteBusy(true); setError(null); setPasteResults(null);
+    const out = [];
+    for (const leg of parsed) {
+      if (leg.error || !leg.stat || !leg.side || leg.line == null) {
+        out.push({ ...leg, status: "unparsed" });
+        continue;
+      }
+      try {
+        const sr = await fetch(`/api/player?q=${encodeURIComponent(leg.name)}`);
+        const sd = await sr.json();
+        const player = (sd.players || [])[0];
+        if (!player) { out.push({ ...leg, status: "noplayer" }); continue; }
+        const lr = await fetch(`/api/logs?playerId=${encodeURIComponent(player.id)}&n=20`);
+        const ld = await lr.json();
+        if (ld.error || !ld.logs?.length) { out.push({ ...leg, player, status: "nologs" }); continue; }
+        const ev = evalLine(ld.logs, window_, leg.stat, leg.line, defaultOdds);
+        const p = leg.side === "over" ? ev.over : ev.under;
+        const hits = leg.side === "over" ? ev.overHits : ev.underHits;
+        out.push({ ...leg, player, logs: ld.logs, p, hits, n: ev.n, vals: ev.vals, status: "ok" });
+      } catch {
+        out.push({ ...leg, status: "error" });
+      }
+    }
+    setPasteResults(out);
+    setPasteBusy(false);
+  };
+
   const addLegFromScan = (item) => {
     if (slate.length >= 10) return;
     setSlate(prev => [...prev, {
@@ -207,7 +241,6 @@ export default function PropDesk() {
     setSlipOpen(true);
   };
 
-  // add from the inline check (custom stat/line/side chosen there)
   const addFromInline = (item, stat, line, side) => {
     if (slate.length >= 10) return;
     setSlate(prev => [...prev, {
@@ -243,19 +276,30 @@ export default function PropDesk() {
     return evalLine(draft.logs, window_, bookStat, Number(bookLine), draft.odds);
   }, [draft, bookStat, bookLine, window_]);
 
-  // group + filter scan results
   const groupedScan = useMemo(() => {
     if (!scanResults) return null;
-    const filtered = scanGroup === "all"
+    return scanGroup === "all"
       ? scanResults
       : scanResults.filter(s => (STAT_GROUPS.find(g => g.label === scanGroup)?.keys || []).includes(s.key));
-    return filtered;
   }, [scanResults, scanGroup]);
 
   const availableGroups = useMemo(() => {
     if (!scanResults) return [];
     return STAT_GROUPS.filter(g => scanResults.some(s => g.keys.includes(s.key)));
   }, [scanResults]);
+
+  // parlay win rate for pasted slip (only legs that parsed OK)
+  const pasteParlay = useMemo(() => {
+    if (!pasteResults) return null;
+    const ok = pasteResults.filter(r => r.status === "ok");
+    if (ok.length < 2) return null;
+    const teams = ok.map(r => r.player?.team || "?");
+    const naiveP = ok.reduce((a, r) => a * r.p, 1);
+    const extraSameTeam = ok.length - new Set(teams).size;
+    const adjP = naiveP * Math.max(0.3, 1 - 0.1 * extraSameTeam);
+    const dec = Math.pow(defaultOdds, ok.length);
+    return { naiveP, adjP, dec, legs: ok.length, extraSameTeam };
+  }, [pasteResults, defaultOdds]);
 
   const saveBet = () => {
     if (!legs.length) return;
@@ -269,6 +313,21 @@ export default function PropDesk() {
     saveTracked([ticket, ...tracked]);
     setSlate([]); setTab("tracker");
   };
+
+  // save pasted slip straight to tracker
+  const savePasteSlip = () => {
+    if (!pasteParlay) return;
+    const ok = pasteResults.filter(r => r.status === "ok");
+    const ticket = {
+      id: Date.now(), date: new Date().toISOString().slice(0, 10),
+      stake, dec: pasteParlay.dec, payout: stake * pasteParlay.dec,
+      legs: ok.map(r => ({ name: r.player.name, stat: STAT_TYPES[r.stat].short, side: r.side, line: r.line, p: r.p })),
+      status: "pending",
+    };
+    saveTracked([ticket, ...tracked]);
+    setPasteResults(null); setPasteText(""); setTab("tracker");
+  };
+
   const markBet = (id, status) => saveTracked(tracked.map(t => t.id === id ? { ...t, status } : t));
   const delBet = (id) => saveTracked(tracked.filter(t => t.id !== id));
 
@@ -290,13 +349,14 @@ export default function PropDesk() {
           </div>
           <button onClick={() => setShowHelp(!showHelp)} style={{ ...btnGhost, fontSize: 11, padding: "6px 10px" }}>{showHelp ? "✕" : "❓ Guide"}</button>
         </div>
-        <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
-          <button onClick={() => setTab("build")} style={tab === "build" ? tabOn : tabOff}>Build Bets</button>
+        <div style={{ display: "flex", gap: 5, marginTop: 10 }}>
+          <button onClick={() => setTab("build")} style={tab === "build" ? tabOn : tabOff}>Build</button>
+          <button onClick={() => setTab("paste")} style={tab === "paste" ? tabOn : tabOff}>Paste Slip</button>
           <button onClick={() => setTab("tracker")} style={tab === "tracker" ? tabOn : tabOff}>
             My Bets {tracked.length > 0 && `(${record.won}-${record.lost})`}
           </button>
         </div>
-        {tab === "build" && (
+        {tab !== "tracker" && (
           <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
             <label style={lbl}>Bankroll
               <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
@@ -322,12 +382,88 @@ export default function PropDesk() {
           <section style={panel}>
             <div style={sectionTitle}>How to win with this</div>
             <div style={{ fontSize: 13, lineHeight: 1.7 }}>
-              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Fastest:</b> tap "🔍 Best bets" on a game — results are grouped by stat (points, rebounds…). Tap any pick to check 747's line right there.</p>
-              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Match the line!</b> The app's number must equal 747's, or the % is meaningless.</p>
-              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Track results:</b> save a bet, mark it Won/Lost in "My Bets" to see if these picks actually make money.</p>
+              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Paste Slip:</b> copy your whole 747 bet slip, paste it in the "Paste Slip" tab, and see the win rate of every leg + the full parlay at once.</p>
+              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Best bets:</b> tap "🔍 Best bets" on a game — results grouped by stat. Tap any pick to check 747's line.</p>
+              <p style={{ marginBottom: 8 }}><b style={{ color: "var(--amber)" }}>Track:</b> save a bet, mark it Won/Lost to see if these picks actually make money.</p>
               <p style={{ color: "var(--red)" }}>Parlay = ALL legs must win. Screening tool, not a guarantee. Bet only what you can lose.</p>
             </div>
           </section>
+        )}
+
+        {/* ───────── PASTE SLIP TAB ───────── */}
+        {tab === "paste" && (
+          <>
+            <section style={panel}>
+              <div style={sectionTitle}>Paste your 747 slip</div>
+              <div style={{ fontSize: 12, color: "var(--mut)" }}>
+                Copy your bet slip from 747 and paste it below. One leg per line, e.g.:<br />
+                <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 11 }}>Player points - Victor Wembanyama under 28.5</span>
+              </div>
+              <textarea value={pasteText} onChange={e => setPasteText(e.target.value)} rows={7}
+                placeholder={"Player steals - O.G. Anunoby over 1.5\nPlayer blocks - Victor Wembanyama under 3.5\nPlayer rebounds - Victor Wembanyama under 11.5\nPlayer assists - Jalen Brunson under 6.5\nPlayer three pointers - Mikal Bridges under 1.5\nPlayer points - Victor Wembanyama under 28.5"}
+                style={{ ...inp, fontSize: 12, lineHeight: 1.5, resize: "vertical" }} />
+              <button onClick={analyzeSlip} disabled={pasteBusy} style={{ ...btnPrimary, width: "100%" }}>
+                {pasteBusy ? "Analyzing each leg…" : "📊 Analyze slip"}
+              </button>
+              {error && <div style={errStyle}>{error}</div>}
+            </section>
+
+            {pasteResults && (
+              <>
+                {/* PARLAY WIN RATE — top summary */}
+                {pasteParlay && (
+                  <section style={{ ...panel, border: "1px solid rgba(251,191,36,.4)" }}>
+                    <div style={{ ...sectionTitle, color: "var(--amber)" }}>Parlay win rate — {pasteParlay.legs} legs</div>
+                    <SegBar p={pasteParlay.adjP} />
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 8 }}>
+                      <div style={miniStat}><div style={miniLbl}>Chance ALL hit</div><div style={{ ...miniVal, color: pasteParlay.adjP > 0.3 ? "var(--green)" : pasteParlay.adjP > 0.1 ? "var(--amber)" : "var(--red)" }}>{fmtPct(pasteParlay.adjP)}</div></div>
+                      <div style={miniStat}><div style={miniLbl}>Payout</div><div style={miniVal}>{pasteParlay.dec.toFixed(2)}x</div></div>
+                      <div style={miniStat}><div style={miniLbl}>{fmtCash(stake, sym)} →</div><div style={{ ...miniVal, color: "var(--amber)" }}>{fmtCash(stake * pasteParlay.dec, sym)}</div></div>
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--mut)" }}>
+                      ⚠ ALL {pasteParlay.legs} legs must win. Win rate is the product of each leg's chance{pasteParlay.extraSameTeam > 0 ? ", adjusted down for same-team correlation" : ""}.
+                    </div>
+                    <button onClick={savePasteSlip} style={{ ...btnPrimary, width: "100%" }}>💾 Save to tracker</button>
+                  </section>
+                )}
+
+                {/* PER-LEG breakdown */}
+                <section style={panel}>
+                  <div style={sectionTitle}>Each leg's win rate</div>
+                  {pasteResults.map((r, i) => {
+                    if (r.status !== "ok") {
+                      const msg = r.status === "noplayer" ? "player not found" : r.status === "nologs" ? "no game logs" : r.status === "unparsed" ? "couldn't read this line" : "error";
+                      return (
+                        <div key={i} style={{ ...card, borderColor: "rgba(248,113,113,.3)" }}>
+                          <div style={{ fontSize: 13 }}>{r.name || r.raw}</div>
+                          <div style={{ fontSize: 11, color: "var(--red)" }}>⚠ {msg} — check spelling or analyze this one manually in Build.</div>
+                        </div>
+                      );
+                    }
+                    const col = r.p >= 0.6 ? "var(--green)" : r.p <= 0.45 ? "var(--red)" : "var(--amber)";
+                    return (
+                      <div key={i} style={{ ...card }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                          <div>
+                            <div style={{ fontSize: 14, fontWeight: 600 }}>{r.player.name}</div>
+                            <div style={{ fontSize: 12, color: "var(--mut)" }}>{STAT_TYPES[r.stat].label} {r.side === "over" ? "Over" : "Under"} {r.line}</div>
+                          </div>
+                          <div style={{ textAlign: "right" }}>
+                            <div style={{ fontSize: 20, fontWeight: 700, color: col, fontFamily: "'IBM Plex Mono',monospace" }}>{fmtPct(r.p)}</div>
+                            <div style={{ fontSize: 10, color: "var(--mut)" }}>hit {r.hits}/{r.n} games</div>
+                          </div>
+                        </div>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
+                          {r.vals.map((v, j) => <Chip key={j} val={v} hit={r.side === "over" ? v > r.line : v < r.line} />)}
+                        </div>
+                      </div>
+                    );
+                  })}
+                  <div style={{ fontSize: 11, color: "var(--mut)" }}>Win rates use your "{window_} games" setting, shrunk toward 50% so small samples don't overclaim. Weakest leg drags the whole parlay.</div>
+                </section>
+              </>
+            )}
+          </>
         )}
 
         {tab === "tracker" && (
@@ -348,7 +484,7 @@ export default function PropDesk() {
             </section>
             <section style={panel}>
               <div style={sectionTitle}>Bet History</div>
-              {tracked.length === 0 && <div style={{ color: "var(--mut)", fontSize: 13 }}>No saved bets yet. Build a parlay, then tap "Save to tracker" in the slip.</div>}
+              {tracked.length === 0 && <div style={{ color: "var(--mut)", fontSize: 13 }}>No saved bets yet. Build or paste a parlay, then tap "Save to tracker".</div>}
               {tracked.map(t => (
                 <div key={t.id} style={{ ...card, borderColor: t.status === "won" ? "rgba(52,211,153,.4)" : t.status === "lost" ? "rgba(248,113,113,.4)" : "var(--line)" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -410,7 +546,6 @@ export default function PropDesk() {
                 {scanning && <div style={{ color: "var(--amber)", fontSize: 13 }}>Scanning roster… ~10-20s.</div>}
                 {scanResults && scanResults.length === 0 && <div style={{ color: "var(--mut)", fontSize: 13 }}>No strong bets cleared the threshold. Try the other team.</div>}
 
-                {/* CATEGORY FILTER PILLS */}
                 {scanResults && scanResults.length > 0 && (
                   <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                     <button onClick={() => setScanGroup("all")} style={scanGroup === "all" ? pillOn : pillOff}>All ({scanResults.length})</button>
@@ -421,7 +556,7 @@ export default function PropDesk() {
                   </div>
                 )}
 
-                {groupedScan && groupedScan.map((s, i) => {
+                {groupedScan && groupedScan.map((s) => {
                   const v = verdict(s.edge);
                   const sideLabel = s.side === "over" ? "Over" : "Under";
                   const rowKey = `${s.player.id}-${s.key}`;
@@ -634,8 +769,8 @@ const btnPrimary = { background: "var(--amber)", color: "#0a0e14", border: "none
 const btnAmber = { background: "rgba(251,191,36,.15)", color: "var(--amber)", border: "1px solid var(--amber)", borderRadius: 6, padding: "9px 12px", fontWeight: 600, fontSize: 12, cursor: "pointer" };
 const btnGhost = { background: "transparent", border: "1px solid var(--line)", borderRadius: 6, color: "var(--amber)", padding: "9px 12px", fontSize: 12, cursor: "pointer" };
 const bigClose = { background: "rgba(248,113,113,.1)", border: "1px solid rgba(248,113,113,.3)", borderRadius: 6, color: "var(--red)", padding: "6px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap" };
-const tabOn = { flex: 1, background: "var(--amber)", color: "#0a0e14", border: "none", borderRadius: 6, padding: "8px", fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "Oswald,sans-serif" };
-const tabOff = { flex: 1, background: "transparent", color: "var(--mut)", border: "1px solid var(--line)", borderRadius: 6, padding: "8px", fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "Oswald,sans-serif" };
+const tabOn = { flex: 1, background: "var(--amber)", color: "#0a0e14", border: "none", borderRadius: 6, padding: "8px 4px", fontWeight: 700, fontSize: 12, cursor: "pointer", fontFamily: "Oswald,sans-serif" };
+const tabOff = { flex: 1, background: "transparent", color: "var(--mut)", border: "1px solid var(--line)", borderRadius: 6, padding: "8px 4px", fontWeight: 600, fontSize: 12, cursor: "pointer", fontFamily: "Oswald,sans-serif" };
 const pillOn = { background: "var(--green)", color: "#0a0e14", border: "none", borderRadius: 20, padding: "5px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" };
 const pillOff = { background: "transparent", color: "var(--mut)", border: "1px solid var(--line)", borderRadius: 20, padding: "5px 12px", fontSize: 11, cursor: "pointer" };
 const panel = { background: "#11161f", border: "1px solid var(--line)", borderRadius: 10, padding: 14, marginBottom: 14, display: "flex", flexDirection: "column", gap: 12 };
