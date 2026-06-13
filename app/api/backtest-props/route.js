@@ -13,6 +13,12 @@ const BOOK_MIN_LINE = {
   stl: 0.5, blk: 0.5, bs: 1.5, fg3m: 0.5, to: 0.5,
 };
 
+// Books always post half-point lines (X.5) to avoid pushes. Force every line to a half.
+const halfLine = (avg, floor) => {
+  const h = Math.floor(avg) + 0.5;   // always lands on .5, just below the average
+  return Math.max(floor, h);
+};
+
 const made = (cell) => {
   if (cell == null) return 0;
   const s = String(cell);
@@ -95,7 +101,7 @@ export async function GET(request) {
       const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
       const floor = BOOK_MIN_LINE[key] || 0.5;
       if (avg < floor) continue;
-      const line = Math.max(floor, Math.round((avg - 0.25) * 2) / 2);
+      const line = halfLine(avg, floor);              // always X.5, never a whole number
       const over = weightedShrunkProb(vals, line, "over");
       const under = weightedShrunkProb(vals, line, "under");
       const side = over.p >= under.p ? "over" : "under";
@@ -105,7 +111,7 @@ export async function GET(request) {
     }
     if (!best) continue;
 
-    // grade against the ACTUAL result game (never seen by picker)
+    // grade against the ACTUAL result game (never seen by picker). .5 lines can't push.
     const actual = STAT_TYPES[best.key].calc(resultGame);
     const won = best.side === "over" ? actual > best.line : actual < best.line;
     graded++; if (won) hit++;
@@ -125,7 +131,7 @@ export async function GET(request) {
     screenHitRate: graded ? `${(hit / graded * 100).toFixed(1)}%` : "n/a",
     parlayWouldHaveCashed: graded > 0 && hit === graded,
     honest_notes: [
-      "Lines are the APP's own (near each player's average), NOT 747's real lines — so this tests the screen's consistency, not whether you beat 747.",
+      "Lines are the APP's own half-point lines (X.5), NOT 747's real lines — tests the screen's consistency, not whether you beat 747.",
       "Sample is whatever games ESPN's free feed still serves; if playersWithPickAndResult is small, treat as anecdote not proof.",
       "Per-leg hit rate is the real signal. A full-parlay 'cashed' on one date is one coin-flip sequence, not evidence.",
     ],
